@@ -1,4 +1,4 @@
-PLEASE GIVE PROPER CREDITS. JUST DONT REBRAND AND RUN IT AS YOURS.
+# PLEASE GIVE PROPER CREDITS. JUST DONT REBRAND AND LAUNCH IT AS YOURS.
 # Opencode-Unlimited-Limit-Bypass
 
 Automatic rate-limit rotator and multi-egress proxy router for OpenCode Desktop and OpenCode CLI.
