@@ -1,0 +1,1533 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Opencode Unlimited — Made by Avatar</title>
+<style>
+  :root {
+    --bg: #070b14;
+    --bg2: #0c1322;
+    --card: rgba(15, 23, 42, 0.72);
+    --card-hover: rgba(20, 30, 54, 0.9);
+    --border: rgba(148, 163, 184, 0.14);
+    --border-glow: rgba(56, 189, 248, 0.42);
+    --text: #e2e8f0;
+    --muted: #94a3b8;
+    --dim: #64748b;
+    --cyan: #22d3ee;
+    --sky: #38bdf8;
+    --violet: #a78bfa;
+    --green: #10b981;
+    --amber: #f59e0b;
+    --red: #ef4444;
+    --mono: "Cascadia Code", "Consolas", monospace;
+    --sans: "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    font-family: var(--sans);
+    background:
+      radial-gradient(900px 500px at 8% -10%, rgba(34, 211, 238, 0.12), transparent 60%),
+      radial-gradient(800px 500px at 95% 0%, rgba(167, 139, 250, 0.12), transparent 60%),
+      linear-gradient(180deg, #060911 0%, #09101d 100%);
+    color: var(--text);
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    user-select: none;
+  }
+
+  /* Header */
+  .topbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 14px 22px;
+    border-bottom: 1px solid var(--border);
+    background: rgba(7, 11, 20, 0.82);
+    backdrop-filter: blur(14px);
+    flex-shrink: 0;
+  }
+
+  .brand {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+
+  .logo-box {
+    width: 38px;
+    height: 38px;
+    border-radius: 11px;
+    background: linear-gradient(135deg, rgba(34,211,238,0.18), rgba(167,139,250,0.2));
+    border: 1px solid rgba(56, 189, 248, 0.45);
+    display: grid;
+    place-items: center;
+    box-shadow: 0 0 18px rgba(34, 211, 238, 0.16);
+  }
+
+  .brand-title {
+    font-size: 16px;
+    font-weight: 700;
+    letter-spacing: 0.4px;
+    display: flex;
+    align-items: center;
+    gap: 9px;
+  }
+
+  .avatar-badge {
+    font-size: 11px;
+    font-weight: 600;
+    padding: 3px 9px;
+    border-radius: 999px;
+    background: linear-gradient(90deg, rgba(34,211,238,0.18), rgba(167,139,250,0.22));
+    border: 1px solid rgba(167, 139, 250, 0.45);
+    color: #e0f2fe;
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+  }
+
+  .brand-sub {
+    font-size: 12px;
+    color: var(--muted);
+    margin-top: 2px;
+  }
+
+  .top-right {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .status-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 7px 13px;
+    border-radius: 999px;
+    font-size: 12px;
+    font-weight: 600;
+    border: 1px solid var(--border);
+    background: rgba(15, 23, 42, 0.85);
+    transition: all 0.2s ease;
+  }
+
+  .dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--amber);
+    box-shadow: 0 0 8px var(--amber);
+  }
+  .dot.ok { background: var(--green); box-shadow: 0 0 10px var(--green); animation: pulse 2.2s infinite; }
+  .dot.bad { background: var(--red); box-shadow: 0 0 10px var(--red); }
+  .dot.spin { background: var(--cyan); box-shadow: 0 0 10px var(--cyan); animation: pulse 0.8s infinite; }
+
+  @keyframes pulse {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50% { opacity: 0.45; transform: scale(1.25); }
+  }
+
+  /* Main scrollable workspace */
+  .main {
+    flex: 1;
+    overflow-y: auto;
+    padding: 18px 22px 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+  }
+
+  .main::-webkit-scrollbar { width: 7px; }
+  .main::-webkit-scrollbar-thumb { background: rgba(148,163,184,0.22); border-radius: 999px; }
+
+  /* Hero Actions */
+  .hero-actions {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 11px;
+  }
+
+  .btn {
+    border: 1px solid var(--border);
+    background: var(--card);
+    color: var(--text);
+    border-radius: 12px;
+    padding: 11px 14px;
+    font-family: var(--sans);
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    transition: all 0.16s ease;
+    position: relative;
+  }
+
+  .btn:hover:not(:disabled) {
+    border-color: var(--border-glow);
+    background: var(--card-hover);
+    transform: translateY(-1px);
+    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
+  }
+  .btn:active:not(:disabled) { transform: translateY(0); }
+  .btn:disabled { opacity: 0.52; cursor: wait; }
+
+  .btn-primary {
+    background: linear-gradient(135deg, rgba(14,165,233,0.26), rgba(139,92,246,0.24));
+    border-color: rgba(56, 189, 248, 0.5);
+  }
+  .btn-primary:hover:not(:disabled) {
+    background: linear-gradient(135deg, rgba(14,165,233,0.38), rgba(139,92,246,0.34));
+  }
+
+  .btn-hop {
+    background: linear-gradient(135deg, rgba(16,185,129,0.2), rgba(34,211,238,0.18));
+    border-color: rgba(16, 185, 129, 0.45);
+  }
+
+  .btn-sm {
+    padding: 6px 10px;
+    font-size: 11.5px;
+    border-radius: 8px;
+  }
+
+  .btn-danger {
+    border-color: rgba(239, 68, 68, 0.35);
+    color: #fecaca;
+  }
+  .btn-danger:hover:not(:disabled) {
+    border-color: rgba(239, 68, 68, 0.7);
+    background: rgba(127, 29, 29, 0.42);
+  }
+
+  /* Grid Cards */
+  .grid-4 {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 11px;
+  }
+
+  .grid-2 {
+    display: grid;
+    grid-template-columns: 1.15fr 1fr;
+    gap: 12px;
+  }
+
+  .card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 13px 15px;
+    transition: border-color 0.16s ease, background 0.16s ease;
+  }
+
+  .card:hover {
+    border-color: rgba(148, 163, 184, 0.28);
+  }
+
+  .stat-label {
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.65px;
+    color: var(--muted);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 6px;
+  }
+
+  .stat-value {
+    margin-top: 7px;
+    font-family: var(--mono);
+    font-size: 13.5px;
+    font-weight: 600;
+    color: #f8fafc;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .stat-sub {
+    margin-top: 5px;
+    font-size: 11.5px;
+    color: var(--dim);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 6px;
+  }
+
+  .tag {
+    font-size: 10.5px;
+    font-weight: 600;
+    padding: 2px 7px;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    background: rgba(15, 23, 42, 0.9);
+  }
+  .tag.ok { color: #6ee7b7; border-color: rgba(16,185,129,0.4); background: rgba(6,78,59,0.35); }
+  .tag.warn { color: #fde68a; border-color: rgba(245,158,11,0.4); background: rgba(120,53,15,0.3); }
+  .tag.bad { color: #fca5a5; border-color: rgba(239,68,68,0.4); background: rgba(127,29,29,0.3); }
+
+  /* Controls Section */
+  .section-head {
+    font-size: 12px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.7px;
+    color: var(--muted);
+    margin-bottom: 10px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+
+  .control-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .ctrl-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    padding: 9px 11px;
+    border-radius: 10px;
+    border: 1px solid rgba(148, 163, 184, 0.1);
+    background: rgba(9, 14, 26, 0.65);
+    transition: border-color 0.15s ease, background 0.15s ease;
+  }
+  .ctrl-row:hover {
+    border-color: var(--border-glow);
+    background: rgba(15, 23, 42, 0.85);
+  }
+
+  .ctrl-info { min-width: 0; }
+  .ctrl-title {
+    font-size: 13px;
+    font-weight: 600;
+    display: flex;
+    align-items: center;
+    gap: 7px;
+  }
+  .ctrl-desc {
+    font-size: 11.5px;
+    color: var(--muted);
+    margin-top: 2px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  /* Toggle Switch */
+  .switch {
+    position: relative;
+    width: 42px;
+    height: 23px;
+    flex-shrink: 0;
+  }
+  .switch input { opacity: 0; width: 0; height: 0; }
+  .slider {
+    position: absolute;
+    inset: 0;
+    cursor: pointer;
+    background: rgba(71, 85, 105, 0.55);
+    border: 1px solid rgba(148, 163, 184, 0.25);
+    border-radius: 999px;
+    transition: 0.2s;
+  }
+  .slider::before {
+    content: "";
+    position: absolute;
+    height: 17px;
+    width: 17px;
+    left: 2px;
+    top: 2px;
+    border-radius: 50%;
+    background: #e2e8f0;
+    transition: 0.2s;
+  }
+  .switch input:checked + .slider {
+    background: rgba(16, 185, 129, 0.38);
+    border-color: rgba(16, 185, 129, 0.8);
+  }
+  .switch input:checked + .slider::before {
+    transform: translateX(19px);
+    background: #34d399;
+    box-shadow: 0 0 8px rgba(52, 211, 153, 0.8);
+  }
+  .switch input:disabled + .slider { opacity: 0.45; cursor: wait; }
+
+  /* Select dropdown */
+  select.edge-select {
+    background: rgba(9, 14, 26, 0.9);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 5px 8px;
+    font-family: var(--mono);
+    font-size: 11.5px;
+    outline: none;
+    max-width: 195px;
+  }
+  select.edge-select:hover, select.edge-select:focus {
+    border-color: var(--cyan);
+  }
+
+  /* Mode Bar & Multi-Egress */
+  .mode-bar-card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 12px 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    backdrop-filter: blur(12px);
+    box-shadow: 0 4px 18px rgba(0, 0, 0, 0.28);
+  }
+  .mode-bar-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+  .mode-tabs {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 8px;
+  }
+  .mode-tab {
+    background: rgba(9, 14, 26, 0.7);
+    border: 1px solid var(--border);
+    color: var(--muted);
+    border-radius: 10px;
+    padding: 8px 12px;
+    font-family: var(--sans);
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.16s ease;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+  }
+  .mode-tab:hover {
+    color: var(--text);
+    border-color: rgba(56, 189, 248, 0.35);
+    background: rgba(15, 23, 42, 0.85);
+  }
+  .mode-tab.active {
+    background: linear-gradient(135deg, rgba(34,211,238,0.18), rgba(167,139,250,0.16));
+    border-color: var(--cyan);
+    color: #fff;
+    box-shadow: 0 0 14px rgba(34, 211, 238, 0.22);
+  }
+  .mode-subpanel {
+    border-top: 1px solid var(--border);
+    padding-top: 10px;
+  }
+  .subpanel-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .subpanel-info {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 11.5px;
+    font-family: var(--mono);
+    color: var(--muted);
+    flex: 1;
+  }
+  .subpanel-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--dim);
+  }
+  .subpanel-dot.ok {
+    background: var(--green);
+    box-shadow: 0 0 8px var(--green);
+  }
+  .subpanel-dot.bad {
+    background: var(--red);
+  }
+  .input-sm, .select-sm {
+    background: rgba(9, 14, 26, 0.9);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 6px 10px;
+    font-family: var(--mono);
+    font-size: 11.5px;
+    outline: none;
+    transition: border-color 0.15s;
+  }
+  .input-sm:focus, .select-sm:focus {
+    border-color: var(--cyan);
+  }
+
+  /* Logs Panel */
+  .logs-card {
+    display: flex;
+    flex-direction: column;
+    min-height: 215px;
+  }
+  .tabs {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+  }
+  .tab {
+    padding: 5px 10px;
+    border-radius: 8px;
+    font-size: 11.5px;
+    font-weight: 600;
+    color: var(--muted);
+    background: rgba(9, 14, 26, 0.6);
+    border: 1px solid transparent;
+    cursor: pointer;
+    transition: all 0.15s ease;
+  }
+  .tab:hover { color: var(--text); border-color: var(--border); }
+  .tab.active {
+    color: #e0f2fe;
+    background: rgba(34, 211, 238, 0.14);
+    border-color: rgba(34, 211, 238, 0.4);
+  }
+
+  .log-box {
+    margin-top: 9px;
+    flex: 1;
+    min-height: 155px;
+    max-height: 220px;
+    overflow-y: auto;
+    background: rgba(4, 7, 14, 0.88);
+    border: 1px solid rgba(148, 163, 184, 0.12);
+    border-radius: 10px;
+    padding: 9px 11px;
+    font-family: var(--mono);
+    font-size: 11.5px;
+    line-height: 1.5;
+    color: #cbd5e1;
+    user-select: text;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+  .log-box::-webkit-scrollbar { width: 6px; }
+  .log-box::-webkit-scrollbar-thumb { background: rgba(148,163,184,0.2); border-radius: 999px; }
+
+  /* Lifecycle / Footer Actions */
+  .lifecycle-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    flex-wrap: wrap;
+  }
+  .btn-group { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+
+  /* Bottom Pinned Feature Inspector */
+  .inspector {
+    flex-shrink: 0;
+    border-top: 1px solid var(--border);
+    background: rgba(6, 10, 19, 0.94);
+    backdrop-filter: blur(12px);
+    padding: 9px 22px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 14px;
+    min-height: 46px;
+  }
+  .insp-left {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    min-width: 0;
+  }
+  .insp-tag {
+    font-size: 10.5px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.6px;
+    padding: 3px 8px;
+    border-radius: 6px;
+    background: rgba(34, 211, 238, 0.14);
+    border: 1px solid rgba(34, 211, 238, 0.35);
+    color: var(--cyan);
+    flex-shrink: 0;
+  }
+  .insp-title {
+    font-size: 12.5px;
+    font-weight: 700;
+    color: #f1f5f9;
+    flex-shrink: 0;
+  }
+  .insp-body {
+    font-size: 12px;
+    color: var(--muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .insp-credit {
+    font-size: 11.5px;
+    color: var(--dim);
+    flex-shrink: 0;
+  }
+  .insp-credit strong { color: var(--violet); }
+
+  /* Floating Hover Tooltip */
+  .float-tip {
+    position: fixed;
+    z-index: 9999;
+    max-width: 310px;
+    padding: 10px 12px;
+    border-radius: 11px;
+    background: rgba(8, 13, 25, 0.96);
+    border: 1px solid rgba(56, 189, 248, 0.45);
+    box-shadow: 0 14px 34px rgba(0, 0, 0, 0.62);
+    pointer-events: none;
+    opacity: 0;
+    transform: translateY(4px);
+    transition: opacity 0.14s ease, transform 0.14s ease;
+  }
+  .float-tip.show { opacity: 1; transform: translateY(0); }
+  .float-tip-title { font-size: 12px; font-weight: 700; color: var(--cyan); margin-bottom: 4px; }
+  .float-tip-body { font-size: 11.5px; line-height: 1.45; color: #cbd5e1; }
+
+  /* Toast & Modal */
+  .toast {
+    position: fixed;
+    right: 22px;
+    bottom: 58px;
+    z-index: 9998;
+    padding: 10px 14px;
+    border-radius: 10px;
+    background: rgba(15, 23, 42, 0.96);
+    border: 1px solid var(--cyan);
+    font-size: 12.5px;
+    color: #f8fafc;
+    box-shadow: 0 10px 28px rgba(0,0,0,0.5);
+    opacity: 0;
+    transform: translateY(8px);
+    pointer-events: none;
+    transition: all 0.2s ease;
+  }
+  .toast.show { opacity: 1; transform: translateY(0); }
+
+  .modal-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 10000;
+    background: rgba(3, 6, 12, 0.72);
+    backdrop-filter: blur(5px);
+    display: none;
+    place-items: center;
+  }
+  .modal-backdrop.show { display: grid; }
+  .modal {
+    width: 440px;
+    max-width: 92vw;
+    background: #0d1526;
+    border: 1px solid rgba(56, 189, 248, 0.35);
+    border-radius: 14px;
+    padding: 18px 20px;
+    box-shadow: 0 22px 50px rgba(0,0,0,0.65);
+  }
+  .modal h3 { font-size: 15px; margin-bottom: 8px; }
+  .modal p { font-size: 12.5px; color: var(--muted); line-height: 1.5; margin-bottom: 16px; }
+  .modal-actions { display: flex; justify-content: flex-end; gap: 9px; }
+</style>
+</head>
+<body>
+
+  <!-- Top Header -->
+  <header class="topbar">
+    <div class="brand"
+         data-tip-title="Opencode Unlimited — Made by Avatar"
+         data-tip-body="Native Windows controller for Cloudflare WARP IPv6 identity rotation, fail-closed edge pinning, and quota-wall auto-healing across both OpenCode Desktop and OpenCode CLI.">
+      <div class="logo-box">
+        <svg width="21" height="21" viewBox="0 0 24 24" fill="none">
+          <path d="M12 3L4.5 20H8.2L12 11.2L15.8 20H19.5L12 3Z" fill="#e0f2fe"/>
+          <circle cx="12" cy="14.5" r="2.2" fill="#22d3ee"/>
+        </svg>
+      </div>
+      <div>
+        <div class="brand-title">
+          OPENCODE UNLIMITED
+          <span class="avatar-badge">made by Avatar</span>
+        </div>
+        <div class="brand-sub">WARP IPv6 /64 Rotator &bull; Cloudflare Edge Pinner &bull; Fail-Closed Windows Lane</div>
+      </div>
+    </div>
+
+    <div class="top-right">
+      <div id="overallPill" class="status-pill"
+           data-tip-title="Protection & Tunnel Status"
+           data-tip-body="Live overall state. Green means WARP is connected in TUN mode with a Cloudflare IPv6 /64 and the fail-closed proxy is active so your home IP never leaks.">
+        <span id="overallDot" class="dot"></span>
+        <span id="overallText">Checking...</span>
+      </div>
+      <button id="btnRefresh" class="btn btn-sm"
+              data-tip-title="Force Live Refresh"
+              data-tip-body="Immediately polls WARP status, queries external IPv6 egress via api64.ipify.org, refreshes opencode.ai edge pool, and updates all logs.">
+        Refresh
+      </button>
+    </div>
+  </header>
+
+  <!-- Workspace -->
+  <main class="main">
+
+    <!-- Egress Mode Selector -->
+    <section class="mode-bar-card">
+      <div class="mode-bar-header">
+        <div style="display:flex;align-items:center;gap:8px;">
+          <span style="font-size:11px;font-weight:700;letter-spacing:0.8px;color:var(--dim);">NETWORK EGRESS ROUTING</span>
+          <span id="modeActiveBadge" class="tag ok">⚡ WARP IPv6</span>
+        </div>
+        <div style="font-size:11px;color:var(--dim);" id="modeDesc">Direct socket-bound Cloudflare WARP /64 subnets</div>
+      </div>
+      <div class="mode-tabs">
+        <button class="mode-tab active" id="tabModeWarp" data-mode="warp"
+                data-tip-title="Cloudflare WARP Mode (Default)"
+                data-tip-body="Routes opencode.ai through local CloudflareWARP WinTun adapter, rotating /64 IPv6 subnets automatically on quota limit.">
+          ⚡ WARP (IPv6)
+        </button>
+        <button class="mode-tab" id="tabModeTor" data-mode="tor"
+                data-tip-title="Tor Network Mode"
+                data-tip-body="Routes opencode.ai traffic through Tor SOCKS5 (port 9050/9150). Provides unlimited global exit nodes for users in regions where WARP is blocked (Russia, Iran, etc.).">
+          🧅 Tor Network
+        </button>
+        <button class="mode-tab" id="tabModeCustom" data-mode="custom"
+                data-tip-title="Custom Proxy Mode"
+                data-tip-body="Route through your own SOCKS5 or HTTP proxy (e.g. Clash, V2Ray, Xray, SingBox, Shadowsocks on 127.0.0.1:10808 or remote).">
+          🌐 Custom Proxy
+        </button>
+        <button class="mode-tab" id="tabModeClean" data-mode="clean"
+                data-tip-title="Clean WARP Endpoint Selector"
+                data-tip-body="In regions where Cloudflare WARP default IP (162.159.192.1) is blocked by ISPs, switch WARP's WireGuard tunnel endpoint to an unblocked clean IP.">
+          🛡️ Clean Endpoint
+        </button>
+      </div>
+
+      <!-- WARP Sub-panel (Routing Scope Selection) -->
+      <div id="panelWarp" class="mode-subpanel" style="display:block;">
+        <div class="subpanel-row" style="align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;">
+          <div style="font-size:12px;color:var(--text);display:flex;align-items:center;gap:6px;">
+            <span style="font-weight:600;">Scope:</span>
+            <span style="font-size:11px;color:var(--dim);" id="warpScopeHint">App-Only: Only OpenCode uses WARP (Discord, games &amp; browsers run on normal internet)</span>
+          </div>
+          <div style="display:flex;gap:6px;">
+            <button id="btnScopeIsolated" class="btn btn-sm btn-primary"
+                    data-tip-title="App-Only Isolated Mode (Recommended)"
+                    data-tip-body="Only OpenCode traffic routes through WARP (port 40000 SOCKS5). Your PC's normal games, Discord, and browsing stay on your direct home internet with zero lag and zero drops during rotation.">
+              🎯 App-Only (Isolated)
+            </button>
+            <button id="btnScopeTun" class="btn btn-sm"
+                    data-tip-title="Full System TUN Mode"
+                    data-tip-body="Routes all Windows traffic through the CloudflareWARP virtual network adapter. Useful if you need a full system VPN.">
+              🌐 Full System TUN
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Tor Sub-panel -->
+      <div id="panelTor" class="mode-subpanel" style="display:none;">
+        <div class="subpanel-row">
+          <div class="subpanel-info">
+            <span class="subpanel-dot" id="torStatusDot"></span>
+            <span id="torStatusText">Detecting Tor...</span>
+          </div>
+          <div style="display:flex;gap:8px;">
+            <button id="btnTorRotate" class="btn btn-sm btn-hop"
+                    data-tip-title="Rotate Tor Circuit"
+                    data-tip-body="Sends NEWNYM signal to Tor control port to immediately get a brand-new exit node IP for OpenCode.">
+              🔄 New Exit Identity
+            </button>
+            <button id="btnTorToggleService" class="btn btn-sm"
+                    data-tip-title="Start / Stop Built-in Tor"
+                    data-tip-body="Starts or stops the headless Tor background daemon.">
+              ▶ Start Tor Daemon
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Custom Proxy Sub-panel -->
+      <div id="panelCustom" class="mode-subpanel" style="display:none;">
+        <div class="subpanel-row">
+          <select id="selProxyType" class="select-sm" style="width:105px;">
+            <option value="socks5">SOCKS5</option>
+            <option value="http">HTTP</option>
+          </select>
+          <input type="text" id="txtProxyAddr" class="input-sm" placeholder="127.0.0.1:10808" style="flex:1;" />
+          <button id="btnSaveCustomProxy" class="btn btn-sm btn-primary">Apply & Route</button>
+        </div>
+      </div>
+
+      <!-- Clean Endpoint Sub-panel -->
+      <div id="panelClean" class="mode-subpanel" style="display:none;">
+        <div class="subpanel-row">
+          <select id="selCleanEndpoint" class="select-sm" style="flex:1;">
+            <option value="">Loading Clean Endpoints...</option>
+          </select>
+          <button id="btnTestCleanPing" class="btn btn-sm">⚡ Ping Test</button>
+          <button id="btnApplyCleanEndpoint" class="btn btn-sm btn-primary">Apply Endpoint</button>
+          <button id="btnResetCleanEndpoint" class="btn btn-sm btn-danger">Reset Default</button>
+        </div>
+        <div id="cleanPingResult" class="stat-sub" style="margin-top:6px;color:var(--cyan);font-family:var(--mono);font-size:11px;max-height:110px;overflow-y:auto;background:rgba(0,0,0,0.3);padding:6px 8px;border-radius:4px;border:1px solid rgba(0,255,255,0.15);display:none;"></div>
+      </div>
+    </section>
+
+    <!-- Primary Launch & Rotation Row -->
+    <section class="hero-actions">
+      <button id="btnLaunchDesktop" class="btn btn-primary"
+              data-tip-title="Launch OpenCode Desktop (OpenCode.exe)"
+              data-tip-body="Opens the OpenCode Desktop GUI app wired to 127.0.0.1:41987. All 5 projects, 36+ existing chats, and ongoing sessions load normally from opencode.db.">
+        Launch OpenCode Desktop
+      </button>
+      <button id="btnLaunchCli" class="btn btn-primary"
+              data-tip-title="Launch OpenCode CLI (Zen Lane)"
+              data-tip-body="Opens a fresh terminal running OpenCode CLI in --standalone mode with its own per-launch IPv6 proxy and random Cloudflare edge.">
+        Launch OpenCode CLI
+      </button>
+      <button id="btnHop" class="btn btn-hop"
+              data-tip-title="Zen Hop — Rotate /64 Identity Now"
+              data-tip-body="Pauses warp-keeper safely, deletes your current Cloudflare WARP registration, registers a fresh device key, reconnects TUN mode, and assigns a brand-new IPv6 /64 + Cloudflare edge (~12s).">
+        Rotate /64 Now (Hop)
+      </button>
+      <button id="btnWarpToggle" class="btn"
+              data-tip-title="Connect / Disconnect Cloudflare WARP"
+              data-tip-body="Toggles the Cloudflare WARP TUN tunnel directly. Note: while disconnected, OpenCode requests fail closed (503) instead of exposing your home ISP IP.">
+        Connect WARP
+      </button>
+    </section>
+
+    <!-- Live Telemetry Cards -->
+    <section class="grid-4">
+      <div class="card" id="cardEgress" style="cursor:pointer"
+           data-tip-title="External IPv6 Egress (/64 Bucket)"
+           data-tip-body="Your public IPv6 exit seen by opencode.ai. Free model limits are keyed to your /64 network block + Cloudflare edge. Click to copy full IPv6.">
+        <div class="stat-label">
+          <span>Public WARP /64</span>
+          <span id="egressTag" class="tag">...</span>
+        </div>
+        <div id="egressPrefix" class="stat-value">Checking...</div>
+        <div class="stat-sub">
+          <span id="egressFull">Querying api64.ipify.org...</span>
+        </div>
+      </div>
+
+      <div class="card" id="cardAdapter" style="cursor:pointer"
+           data-tip-title="CloudflareWARP Adapter IPv6"
+           data-tip-body="Local IPv6 address on the Windows CloudflareWARP WinTun interface. zen-proxy explicitly binds every socket to this IP so traffic physically cannot exit via Wi-Fi/Ethernet ISP.">
+        <div class="stat-label">
+          <span>WARP Adapter IP</span>
+          <span id="warpModeTag" class="tag">...</span>
+        </div>
+        <div id="adapterV6" class="stat-value">---</div>
+        <div class="stat-sub">
+          <span id="adapterSub">Socket-bound fail-closed</span>
+        </div>
+      </div>
+
+      <div class="card"
+           data-tip-title="Pinned Cloudflare Edge (AAAA)"
+           data-tip-body="opencode.ai resolves to multiple Cloudflare IPv6 edge nodes. Pinning a random AAAA edge spreads load across buckets; re-roll anytime or pin a specific node.">
+        <div class="stat-label">
+          <span>Pinned Edge (AAAA)</span>
+          <button id="btnRerollEdge" class="btn btn-sm" style="padding:2px 7px;font-size:10.5px;"
+                  data-tip-title="Re-roll Cloudflare Edge"
+                  data-tip-body="Switches the active Desktop proxy (127.0.0.1:41987) to a different random opencode.ai IPv6 edge immediately without restarting OpenCode.">
+            Re-roll
+          </button>
+        </div>
+        <div id="pinnedEdge" class="stat-value">Auto</div>
+        <div class="stat-sub">
+          <select id="edgeSelect" class="edge-select"
+                  data-tip-title="Edge Selection Mode"
+                  data-tip-body="Choose 'Auto-Random' to rotate automatically per session/hop, or pin a specific IPv6 AAAA edge from the live DNS pool.">
+            <option value="auto">Auto-Random Edge</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="card"
+           data-tip-title="Auto-Rotation & Existing Data"
+           data-tip-body="Counts automatic & manual /64 rotations, blacklisted /64s (never reused up to 200), and your intact projects/sessions in opencode.db.">
+        <div class="stat-label">
+          <span>Stats &amp; Saved Work</span>
+          <span id="hopsTag" class="tag ok">0 hops</span>
+        </div>
+        <div id="dbSummary" class="stat-value">0 projects &bull; 0 chats</div>
+        <div class="stat-sub">
+          <span id="blacklistSummary">0 blacklisted /64s</span>
+          <span id="lastHopText">Last hop: never</span>
+        </div>
+      </div>
+    </section>
+
+    <!-- Controls + Live Logs -->
+    <section class="grid-2">
+      <!-- Controllable Services & Protections -->
+      <div class="card">
+        <div class="section-head">
+          <span>Protection &amp; Service Controls</span>
+          <span id="adminBadge" class="tag">Standard User</span>
+        </div>
+        <div class="control-list">
+          <div class="ctrl-row"
+               data-tip-title="WARP Keeper (Background Watchdog + Desktop Proxy)"
+               data-tip-body="Runs silently every 45s to enforce WARP TUN mode, auto-repair dead tunnels, and host the fail-closed Desktop/service proxy on 127.0.0.1:41987.">
+            <div class="ctrl-info">
+              <div class="ctrl-title">WARP Keeper <span id="keeperTag" class="tag">...</span></div>
+              <div class="ctrl-desc">Enforces TUN mode &amp; hosts Desktop proxy (127.0.0.1:41987)</div>
+            </div>
+            <label class="switch">
+              <input type="checkbox" id="chkKeeper" />
+              <span class="slider"></span>
+            </label>
+          </div>
+
+          <div class="ctrl-row"
+               data-tip-title="Zen Guard (Quota Wall Auto-Rotator)"
+               data-tip-body="Tails opencode.log every 10s by byte offset. When 'QuotaExceeded' appears, it blacklists the current /64 and rotates WARP automatically in ~12 seconds.">
+            <div class="ctrl-info">
+              <div class="ctrl-title">Zen Guard <span id="guardTag" class="tag">...</span></div>
+              <div class="ctrl-desc">Auto-detects QuotaExceeded in opencode.log &amp; rotates /64</div>
+            </div>
+            <label class="switch">
+              <input type="checkbox" id="chkGuard" />
+              <span class="slider"></span>
+            </label>
+          </div>
+
+          <div class="ctrl-row"
+               data-tip-title="OpenCode Desktop Service Proxy (service.json)"
+               data-tip-body="Configures opencode's background server (serve --service, used by OpenCode.exe) to route through 127.0.0.1:41987 so opening the normal Desktop app is automatically protected.">
+            <div class="ctrl-info">
+              <div class="ctrl-title">Desktop App Proxy <span id="svcTag" class="tag">...</span></div>
+              <div class="ctrl-desc">Wires OpenCode.exe daemon via service.json</div>
+            </div>
+            <label class="switch">
+              <input type="checkbox" id="chkServiceProxy" />
+              <span class="slider"></span>
+            </label>
+          </div>
+
+          <div class="ctrl-row"
+               data-tip-title="Windows Firewall Kill-Switch (OUC_LEAKGUARD_CLI)"
+               data-tip-body="Blocks opencode-cli.exe from making direct outbound internet connections, forcing 100% of traffic through localhost zen-proxy -> WARP. Prompts UAC admin approval when toggled.">
+            <div class="ctrl-info">
+              <div class="ctrl-title">Firewall Kill-Switch <span id="fwTag" class="tag">...</span></div>
+              <div class="ctrl-desc">OS-level rule blocking direct non-WARP CLI egress (UAC)</div>
+            </div>
+            <label class="switch">
+              <input type="checkbox" id="chkFirewall" />
+              <span class="slider"></span>
+            </label>
+          </div>
+
+          <div class="ctrl-row"
+               data-tip-title="Strict All-Traffic WARP Proxy Mode"
+               data-tip-body="When ON, zen-proxy refuses non-opencode.ai hosts too unless WARP IPv6 is active. When OFF, opencode.ai is strictly fail-closed while normal IPv4 tools (e.g., npm/local) still connect if needed.">
+            <div class="ctrl-info">
+              <div class="ctrl-title">Strict All-Hosts WARP <span id="strictTag" class="tag">...</span></div>
+              <div class="ctrl-desc">Fail-closed for non-opencode.ai domains inside proxy too</div>
+            </div>
+            <label class="switch">
+              <input type="checkbox" id="chkStrict" />
+              <span class="slider"></span>
+            </label>
+          </div>
+
+          <div class="ctrl-row"
+               data-tip-title="Auto-Start at Windows Login"
+               data-tip-body="Registers OpencodeUnlimited-Keeper and OpencodeUnlimited-Guard in Windows Task Scheduler (AtLogOn) so protection starts silently on every reboot.">
+            <div class="ctrl-info">
+              <div class="ctrl-title">Logon Auto-Start <span id="autoTag" class="tag">...</span></div>
+              <div class="ctrl-desc">Windows Scheduled Tasks for Keeper &amp; Guard</div>
+            </div>
+            <label class="switch">
+              <input type="checkbox" id="chkAutostart" />
+              <span class="slider"></span>
+            </label>
+          </div>
+        </div>
+      </div>
+
+      <!-- Live Logs & Blacklist Inspector -->
+      <div class="card logs-card">
+        <div class="section-head">
+          <div class="tabs">
+            <button class="tab active" data-tab="guard"
+                    data-tip-title="Zen Guard Log"
+                    data-tip-body="Shows wall detections, rotation attempts, blacklisted block skips, and completed /64 hops.">Guard Log</button>
+            <button class="tab" data-tab="keeper"
+                    data-tip-title="WARP Keeper Log"
+                    data-tip-body="Shows WARP tunnel health checks, proxy port 41987 startup, edge selection, and automatic tunnel repairs.">Keeper Log</button>
+            <button class="tab" data-tab="opencode"
+                    data-tip-title="OpenCode Log Tail"
+                    data-tip-body="Live tail of C:\Users\<you>\.local\share\opencode\log\opencode.log — the file Zen Guard watches for QuotaExceeded.">OpenCode Log</button>
+            <button class="tab" data-tab="blacklist"
+                    data-tip-title="Blacklisted /64 Prefixes"
+                    data-tip-body="IPv6 /64 blocks that hit the daily quota limit and will be skipped automatically during future rotations (capped at 200).">Blacklist</button>
+          </div>
+          <div class="btn-group">
+            <button id="btnClearBlacklist" class="btn btn-sm" style="display:none"
+                    data-tip-title="Clear /64 Blacklist"
+                    data-tip-body="Wipes the saved burned /64 list (useful after daily quota resets at midnight UTC).">Clear</button>
+            <button id="btnCopyLog" class="btn btn-sm"
+                    data-tip-title="Copy Current View"
+                    data-tip-body="Copies the currently displayed log or blacklist text to your clipboard.">Copy</button>
+          </div>
+        </div>
+        <div id="logBox" class="log-box">Loading logs...</div>
+      </div>
+    </section>
+
+    <!-- System Setup & Maintenance Bar -->
+    <section class="card lifecycle-bar">
+      <div class="btn-group">
+        <button id="btnInstallRepair" class="btn btn-sm btn-primary"
+                data-tip-title="Install / Repair Everything"
+                data-tip-body="Deploys scripts & .cmd shims to %LOCALAPPDATA%\opencode-unlimited, updates User PATH, registers logon tasks, connects WARP in TUN mode, and wires OpenCode Desktop.">
+          Install / Repair System
+        </button>
+        <button id="btnOpenFolder" class="btn btn-sm"
+                data-tip-title="Open Data & Logs Folder"
+                data-tip-body="Opens %LOCALAPPDATA%\opencode-unlimited in File Explorer so you can inspect scripts, guard state, and logs directly.">
+          Open Folder
+        </button>
+        <button id="btnCopyDiag" class="btn btn-sm"
+                data-tip-title="Copy Diagnostics Report"
+                data-tip-body="Copies a full JSON diagnostic snapshot (redacted-free local status) to your clipboard for troubleshooting.">
+          Copy Diagnostics
+        </button>
+      </div>
+      <div class="btn-group">
+        <span id="pathBadge" class="tag"
+              data-tip-title="User PATH Shim Status"
+              data-tip-body="Checks whether %LOCALAPPDATA%\opencode-unlimited\bin is first in your User PATH so typing 'opencode' in new terminals uses Zen Lane.">PATH: ...</span>
+        <button id="btnUninstall" class="btn btn-sm btn-danger"
+                data-tip-title="Uninstall Cleanly"
+                data-tip-body="Stops Keeper & Guard, removes Scheduled Tasks, removes firewall rule, restores OpenCode Desktop service to direct egress, cleans PATH, disconnects WARP, and deletes %LOCALAPPDATA%\opencode-unlimited. Your OpenCode projects & chats are untouched.">
+          Uninstall
+        </button>
+      </div>
+    </section>
+
+  </main>
+
+  <!-- Pinned Live Feature Inspector -->
+  <footer class="inspector">
+    <div class="insp-left">
+      <span class="insp-tag">Feature Guide</span>
+      <span id="inspTitle" class="insp-title">Hover any control or metric</span>
+      <span id="inspBody" class="insp-body">Move your cursor over any button, card, switch, or log tab to inspect how it works.</span>
+    </div>
+    <div class="insp-credit">Crafted &amp; built by <strong>Avatar</strong></div>
+  </footer>
+
+  <!-- Floating Tooltip -->
+  <div id="floatTip" class="float-tip">
+    <div id="floatTipTitle" class="float-tip-title"></div>
+    <div id="floatTipBody" class="float-tip-body"></div>
+  </div>
+
+  <!-- Toast -->
+  <div id="toast" class="toast"></div>
+
+  <!-- Confirmation Modal -->
+  <div id="modalBg" class="modal-backdrop">
+    <div class="modal">
+      <h3 id="modalTitle">Confirm Action</h3>
+      <p id="modalBody"></p>
+      <div class="modal-actions">
+        <button id="modalCancel" class="btn btn-sm">Cancel</button>
+        <button id="modalConfirm" class="btn btn-sm btn-danger">Confirm</button>
+      </div>
+    </div>
+  </div>
+
+<script>
+  let state = null;
+  let activeTab = "guard";
+  let busyIds = new Set();
+
+  const $ = (id) => document.getElementById(id);
+
+  function showToast(msg) {
+    const t = $("toast");
+    t.textContent = msg;
+    t.classList.add("show");
+    clearTimeout(showToast._timer);
+    showToast._timer = setTimeout(() => t.classList.remove("show"), 3400);
+  }
+
+  function setTag(el, text, cls) {
+    el.textContent = text;
+    el.className = "tag" + (cls ? " " + cls : "");
+  }
+
+  function formatTime(epoch) {
+    if (!epoch) return "never";
+    const d = new Date(epoch * 1000);
+    return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  }
+
+  function renderLogs() {
+    if (!state) return;
+    const box = $("logBox");
+    const clearBtn = $("btnClearBlacklist");
+    clearBtn.style.display = activeTab === "blacklist" ? "inline-flex" : "none";
+
+    if (activeTab === "blacklist") {
+      const bl = state.stats.blacklist || [];
+      box.textContent = bl.length
+        ? bl.map((b, i) => `${String(i + 1).padStart(2, "0")}. ${b}::/64`).join("\n")
+        : "No /64 blocks blacklisted yet.";
+      return;
+    }
+    const lines = (state.logs && state.logs[activeTab]) || [];
+    const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 35;
+    box.textContent = lines.length ? lines.join("\n") : `No ${activeTab} log entries yet.`;
+    if (atBottom) box.scrollTop = box.scrollHeight;
+  }
+
+  function renderState(s) {
+    state = s;
+    const w = s.warp;
+    const sv = s.services;
+    const ln = s.lane;
+    const st = s.stats;
+
+    // Header pill
+    const pillDot = $("overallDot");
+    const pillTxt = $("overallText");
+    if (w.rotating) {
+      pillDot.className = "dot spin";
+      pillTxt.textContent = "ROTATING /64...";
+    } else if (w.connected && w.adapter_v6 && (!w.egress_v6 || w.is_cf)) {
+      pillDot.className = "dot ok";
+      pillTxt.textContent = "PROTECTED • WARP IPv6";
+    } else if (w.connected) {
+      pillDot.className = "dot";
+      pillTxt.textContent = "WARP CONNECTED (VERIFYING IPv6)";
+    } else {
+      pillDot.className = "dot bad";
+      pillTxt.textContent = "DISCONNECTED (FAIL-CLOSED)";
+    }
+
+    // WARP connect button
+    $("btnWarpToggle").textContent = w.connected ? "Disconnect WARP" : "Connect WARP";
+
+    // Card 1: Egress
+    if (w.egress_v6) {
+      $("egressPrefix").textContent = (w.egress_prefix || w.egress_v6) + "/64";
+      $("egressFull").textContent = w.egress_v6;
+      setTag($("egressTag"), w.is_cf ? "CF Verified" : "Non-WARP!", w.is_cf ? "ok" : "bad");
+    } else if (w.checking_egress) {
+      $("egressPrefix").textContent = "Checking...";
+      $("egressFull").textContent = "Querying api64.ipify.org...";
+      setTag($("egressTag"), "Probing", "warn");
+    } else {
+      $("egressPrefix").textContent = w.connected ? "No IPv6 response" : "Offline (Blocked)";
+      $("egressFull").textContent = w.connected ? "Click Refresh to re-probe" : "Fail-closed active";
+      setTag($("egressTag"), w.connected ? "Pending" : "Closed", w.connected ? "warn" : "bad");
+    }
+
+    // Card 2: Adapter IPv6
+    $("adapterV6").textContent = w.adapter_v6 || "Not active";
+    setTag($("warpModeTag"), (w.mode || "?").toUpperCase(), w.mode.toLowerCase().includes("warp") ? "ok" : "warn");
+    $("adapterSub").textContent = w.adapter_v6 ? "Socket-bound fail-closed" : "Waiting for CloudflareWARP NIC";
+
+    // Card 3: Pinned Edge & dropdown
+    $("pinnedEdge").textContent = ln.pinned_edge || (ln.edge_override !== "auto" ? ln.edge_override : "Auto (next request)");
+    const sel = $("edgeSelect");
+    const pool = ln.edge_pool || [];
+    const curOpts = Array.from(sel.options).map((o) => o.value);
+    const desired = ["auto", ...pool];
+    if (JSON.stringify(curOpts) !== JSON.stringify(desired)) {
+      sel.innerHTML = "";
+      const autoOpt = document.createElement("option");
+      autoOpt.value = "auto";
+      autoOpt.textContent = "Auto-Random Edge";
+      sel.appendChild(autoOpt);
+      pool.forEach((ip) => {
+        const o = document.createElement("option");
+        o.value = ip;
+        o.textContent = ip;
+        sel.appendChild(o);
+      });
+    }
+    sel.value = desired.includes(ln.edge_override) ? ln.edge_override : "auto";
+
+    // Card 4: Stats & DB
+    setTag($("hopsTag"), `${st.hops} hop${st.hops === 1 ? "" : "s"}`, "ok");
+    $("dbSummary").textContent = `${st.db.projects} projects • ${st.db.sessions} chats`;
+    $("blacklistSummary").textContent = `${st.blacklist_count} blacklisted /64s`;
+    $("lastHopText").textContent = `Last hop: ${formatTime(st.last_hop)}`;
+
+    // Controls & Switches
+    setTag($("adminBadge"), sv.is_admin ? "Administrator" : "Standard User", sv.is_admin ? "ok" : "");
+    setTag($("keeperTag"), sv.keeper_running ? "Running" : "Stopped", sv.keeper_running ? "ok" : "bad");
+    setTag($("guardTag"), sv.guard_running ? "Running" : "Stopped", sv.guard_running ? "ok" : "bad");
+    setTag(
+      $("svcTag"),
+      ln.desktop_service_wired && sv.proxy_listening ? "Wired :41987" : ln.desktop_service_wired ? "Proxy Down" : "Direct",
+      ln.desktop_service_wired && sv.proxy_listening ? "ok" : "warn"
+    );
+    setTag($("fwTag"), sv.firewall_installed ? "Enabled" : "Off", sv.firewall_installed ? "ok" : "");
+    setTag($("strictTag"), ln.strict_mode ? "Strict" : "Standard", ln.strict_mode ? "ok" : "");
+    setTag($("autoTag"), sv.keeper_task && sv.guard_task ? "Enabled" : "Off", sv.keeper_task && sv.guard_task ? "ok" : "warn");
+
+    if (!busyIds.has("chkKeeper")) $("chkKeeper").checked = sv.keeper_running;
+    if (!busyIds.has("chkGuard")) $("chkGuard").checked = sv.guard_running;
+    if (!busyIds.has("chkServiceProxy")) $("chkServiceProxy").checked = ln.desktop_service_wired;
+    if (!busyIds.has("chkFirewall")) $("chkFirewall").checked = sv.firewall_installed;
+    if (!busyIds.has("chkStrict")) $("chkStrict").checked = ln.strict_mode;
+    if (!busyIds.has("chkAutostart")) $("chkAutostart").checked = sv.keeper_task && sv.guard_task;
+
+    setTag($("pathBadge"), ln.path_wired ? "PATH: Wired" : "PATH: Not First", ln.path_wired ? "ok" : "warn");
+
+    // Multi-Egress Mode State
+    const eg = s.egress || { mode: "warp" };
+    const curMode = eg.mode || "warp";
+
+    ["warp", "tor", "custom", "clean"].forEach((m) => {
+      const tab = $("tabMode" + m.charAt(0).toUpperCase() + m.slice(1));
+      if (tab) tab.classList.toggle("active", m === curMode);
+    });
+
+    const badge = $("modeActiveBadge");
+    const desc = $("modeDesc");
+    if (curMode === "warp") {
+      badge.textContent = "⚡ WARP IPv6";
+      badge.className = "tag ok";
+      desc.textContent = "Direct socket-bound Cloudflare WARP /64 subnets";
+    } else if (curMode === "tor") {
+      badge.textContent = "🧅 Tor Network";
+      badge.className = "tag " + (eg.tor_active ? "ok" : "warn");
+      desc.textContent = eg.tor_active ? `Routing via Tor (${eg.tor_target})` : "Tor offline (click Start Tor)";
+    } else if (curMode === "custom") {
+      badge.textContent = "🌐 Custom Proxy";
+      badge.className = "tag ok";
+      desc.textContent = `Routing via ${(eg.custom_type || "SOCKS5").toUpperCase()} -> ${eg.custom_proxy || "127.0.0.1:10808"}`;
+    } else if (curMode === "clean") {
+      badge.textContent = "🛡️ Clean Endpoint";
+      badge.className = "tag ok";
+      desc.textContent = "Cloudflare WARP with unblocked WireGuard endpoint";
+    }
+
+    $("panelWarp").style.display = curMode === "warp" ? "block" : "none";
+    $("panelTor").style.display = curMode === "tor" ? "block" : "none";
+    $("panelCustom").style.display = curMode === "custom" ? "block" : "none";
+    $("panelClean").style.display = curMode === "clean" ? "block" : "none";
+
+    // WARP Scope State
+    const warpScope = eg.warp_scope || "isolated";
+    const isIso = warpScope === "isolated";
+    if ($("btnScopeIsolated")) $("btnScopeIsolated").classList.toggle("btn-primary", isIso);
+    if ($("btnScopeTun")) $("btnScopeTun").classList.toggle("btn-primary", !isIso);
+    if ($("warpScopeHint")) {
+      $("warpScopeHint").textContent = isIso
+        ? "App-Only: Only OpenCode uses WARP (Discord, games & browsers run on normal internet)"
+        : "Full System TUN: All Windows traffic routes through Cloudflare virtual adapter";
+    }
+
+    // Tor state
+    const torDot = $("torStatusDot");
+    const torTxt = $("torStatusText");
+    if (eg.tor_active) {
+      torDot.className = "subpanel-dot ok";
+      torTxt.textContent = `Active Tor node: ${eg.tor_target}`;
+    } else {
+      torDot.className = "subpanel-dot bad";
+      torTxt.textContent = "Tor inactive (ports 9050 / 9150 closed)";
+    }
+    $("btnTorToggleService").textContent = eg.tor_running ? "⏹ Stop Tor Daemon" : "▶ Start Tor Daemon";
+
+    // Custom proxy inputs
+    if (!$("txtProxyAddr").dataset.userEdited && eg.custom_proxy) {
+      $("txtProxyAddr").value = eg.custom_proxy;
+      $("selProxyType").value = eg.custom_type || "socks5";
+    }
+
+    // Clean endpoints dropdown
+    if (eg.clean_endpoints && eg.clean_endpoints.length > 0) {
+      const cleanSel = $("selCleanEndpoint");
+      if (cleanSel.dataset.loaded !== "true") {
+        cleanSel.dataset.loaded = "true";
+        cleanSel.innerHTML = "";
+        eg.clean_endpoints.forEach((ep) => {
+          const opt = document.createElement("option");
+          opt.value = ep;
+          opt.textContent = ep;
+          cleanSel.appendChild(opt);
+        });
+      }
+    }
+
+    renderLogs();
+  }
+
+  async function refresh(forceEgress = false) {
+    if (!window.pywebview || !window.pywebview.api) return;
+    try {
+      const s = await window.pywebview.api.get_state(forceEgress);
+      renderState(s);
+    } catch (e) {
+      console.error(e);
+    }
+  }
+
+  async function runAction(btnOrInputId, fn, labelWhenBusy = null) {
+    const el = btnOrInputId ? $(btnOrInputId) : null;
+    const origText = el && el.tagName === "BUTTON" ? el.textContent : null;
+    if (el) {
+      busyIds.add(btnOrInputId);
+      el.disabled = true;
+      if (labelWhenBusy && origText !== null) el.textContent = labelWhenBusy;
+    }
+    try {
+      const res = await fn();
+      if (res && res.message) showToast(res.message);
+      await refresh(false);
+      return res;
+    } catch (err) {
+      showToast("Error: " + err);
+    } finally {
+      if (el) {
+        busyIds.delete(btnOrInputId);
+        el.disabled = false;
+        if (origText !== null) el.textContent = origText;
+      }
+    }
+  }
+
+  function confirmDialog(title, body, onConfirm) {
+    $("modalTitle").textContent = title;
+    $("modalBody").textContent = body;
+    $("modalBg").classList.add("show");
+    $("modalConfirm").onclick = async () => {
+      $("modalBg").classList.remove("show");
+      await onConfirm();
+    };
+    $("modalCancel").onclick = () => $("modalBg").classList.remove("show");
+  }
+
+  // Hover Explanation Engine (Floating Tooltip + Pinned Feature Inspector)
+  const tipEl = $("floatTip");
+  let tipTimer = null;
+
+  function findTipNode(target) {
+    return target && target.closest ? target.closest("[data-tip-title]") : null;
+  }
+
+  function positionTip(x, y) {
+    const pad = 14;
+    const rect = tipEl.getBoundingClientRect();
+    let left = x + 16;
+    let top = y + 18;
+    if (left + rect.width + pad > window.innerWidth) left = Math.max(pad, x - rect.width - 14);
+    if (top + rect.height + pad > window.innerHeight) top = Math.max(pad, y - rect.height - 14);
+    tipEl.style.left = left + "px";
+    tipEl.style.top = top + "px";
+  }
+
+  document.addEventListener("mousemove", (e) => {
+    const node = findTipNode(e.target);
+    if (!node) {
+      clearTimeout(tipTimer);
+      tipEl.classList.remove("show");
+      return;
+    }
+    const title = node.getAttribute("data-tip-title");
+    const body = node.getAttribute("data-tip-body");
+    $("inspTitle").textContent = title;
+    $("inspBody").textContent = body;
+
+    if (tipEl.dataset.activeTitle !== title) {
+      tipEl.dataset.activeTitle = title;
+      $("floatTipTitle").textContent = title;
+      $("floatTipBody").textContent = body;
+      tipEl.classList.remove("show");
+      clearTimeout(tipTimer);
+      tipTimer = setTimeout(() => {
+        positionTip(e.clientX, e.clientY);
+        tipEl.classList.add("show");
+      }, 220);
+    } else if (tipEl.classList.contains("show")) {
+      positionTip(e.clientX, e.clientY);
+    }
+  });
+
+  document.addEventListener("mouseleave", () => {
+    clearTimeout(tipTimer);
+    tipEl.classList.remove("show");
+  });
+
+  // Wire UI handlers
+  $("btnRefresh").onclick = () => runAction("btnRefresh", () => refresh(true).then(() => ({ message: "Refreshed live WARP & IPv6 status." })), "...");
+
+  // Multi-Egress Mode Handlers
+  $("tabModeWarp").onclick = () => {
+    $("panelWarp").style.display = "block";
+    $("panelTor").style.display = "none";
+    $("panelCustom").style.display = "none";
+    $("panelClean").style.display = "none";
+    document.querySelectorAll(".mode-tab").forEach(t => t.classList.remove("active"));
+    $("tabModeWarp").classList.add("active");
+    runAction("tabModeWarp", () => window.pywebview.api.set_egress_mode("warp"), "Switching to WARP...");
+  };
+  $("btnScopeIsolated").onclick = () => runAction("btnScopeIsolated", () => window.pywebview.api.set_warp_scope("isolated"), "Applying Isolated Scope...");
+  $("btnScopeTun").onclick = () => runAction("btnScopeTun", () => window.pywebview.api.set_warp_scope("tun"), "Applying TUN Scope...");
+  $("tabModeTor").onclick = () => {
+    $("panelWarp").style.display = "none";
+    $("panelTor").style.display = "block";
+    $("panelCustom").style.display = "none";
+    $("panelClean").style.display = "none";
+    document.querySelectorAll(".mode-tab").forEach(t => t.classList.remove("active"));
+    $("tabModeTor").classList.add("active");
+    runAction("tabModeTor", () => window.pywebview.api.set_egress_mode("tor"), "Activating Tor...");
+  };
+  $("tabModeCustom").onclick = () => {
+    $("panelWarp").style.display = "none";
+    $("panelTor").style.display = "none";
+    $("panelCustom").style.display = "block";
+    $("panelClean").style.display = "none";
+    document.querySelectorAll(".mode-tab").forEach(t => t.classList.remove("active"));
+    $("tabModeCustom").classList.add("active");
+    const addr = $("txtProxyAddr").value.trim() || "127.0.0.1:10808";
+    const ptype = $("selProxyType").value;
+    runAction("tabModeCustom", () => window.pywebview.api.set_egress_mode("custom", addr, ptype), "Applying Proxy...");
+  };
+  $("tabModeClean").onclick = () => {
+    $("panelWarp").style.display = "none";
+    $("panelTor").style.display = "none";
+    $("panelCustom").style.display = "none";
+    $("panelClean").style.display = "block";
+    document.querySelectorAll(".mode-tab").forEach(t => t.classList.remove("active"));
+    $("tabModeClean").classList.add("active");
+  };
+
+  $("btnTorRotate").onclick = () => runAction("btnTorRotate", () => window.pywebview.api.rotate_tor_circuit(), "Rotating Tor Circuit...");
+  $("btnTorToggleService").onclick = () => {
+    const isRunning = state && state.egress && state.egress.tor_running;
+    runAction("btnTorToggleService", () => window.pywebview.api.toggle_tor_service(!isRunning), isRunning ? "Stopping Tor..." : "Starting Tor...");
+  };
+
+  $("txtProxyAddr").oninput = () => { $("txtProxyAddr").dataset.userEdited = "true"; };
+  $("btnSaveCustomProxy").onclick = () => {
+    const addr = $("txtProxyAddr").value.trim() || "127.0.0.1:10808";
+    const ptype = $("selProxyType").value;
+    runAction("btnSaveCustomProxy", () => window.pywebview.api.set_egress_mode("custom", addr, ptype), "Saving Proxy...");
+  };
+
+  $("btnApplyCleanEndpoint").onclick = () => {
+    const ep = $("selCleanEndpoint").value;
+    if (!ep) return;
+    runAction("btnApplyCleanEndpoint", () => window.pywebview.api.set_clean_endpoint(ep), "Setting Endpoint...");
+  };
+  $("btnResetCleanEndpoint").onclick = () => runAction("btnResetCleanEndpoint", () => window.pywebview.api.reset_clean_endpoint(), "Resetting...");
+  $("btnTestCleanPing").onclick = () => {
+    $("cleanPingResult").style.display = "block";
+    $("cleanPingResult").textContent = "Pinging endpoints in parallel...";
+    window.pywebview.api.test_clean_endpoints().then(res => {
+      if (res && res.endpoints) {
+        const lines = res.endpoints.map(r => `${r.endpoint} -> ${r.latency ? r.latency + 'ms' : 'TIMEOUT / BLOCKED'}`);
+        $("cleanPingResult").innerHTML = lines.join("<br/>");
+      } else {
+        $("cleanPingResult").textContent = (res && res.message) || "Test completed.";
+      }
+    });
+  };
+  $("btnLaunchDesktop").onclick = () => runAction("btnLaunchDesktop", () => window.pywebview.api.launch_desktop(), "Launching...");
+  $("btnLaunchCli").onclick = () => runAction("btnLaunchCli", () => window.pywebview.api.launch_cli(), "Opening...");
+  $("btnHop").onclick = () => runAction("btnHop", () => window.pywebview.api.hop_now(), "Rotating /64...");
+  $("btnWarpToggle").onclick = () => {
+    const conn = state && state.warp && state.warp.connected;
+    runAction("btnWarpToggle", () => conn ? window.pywebview.api.warp_disconnect() : window.pywebview.api.warp_connect(), conn ? "Disconnecting..." : "Connecting...");
+  };
+  $("btnRerollEdge").onclick = () => runAction("btnRerollEdge", () => window.pywebview.api.reroll_edge(), "...");
+  $("edgeSelect").onchange = (e) => runAction("edgeSelect", () => window.pywebview.api.set_edge_override(e.target.value));
+
+  $("chkKeeper").onchange = (e) => runAction("chkKeeper", () => window.pywebview.api.toggle_worker("keeper", e.target.checked));
+  $("chkGuard").onchange = (e) => runAction("chkGuard", () => window.pywebview.api.toggle_worker("guard", e.target.checked));
+  $("chkServiceProxy").onchange = (e) => runAction("chkServiceProxy", () => window.pywebview.api.toggle_desktop_service_proxy(e.target.checked));
+  $("chkFirewall").onchange = (e) => runAction("chkFirewall", () => window.pywebview.api.toggle_firewall(e.target.checked));
+  $("chkStrict").onchange = (e) => runAction("chkStrict", () => window.pywebview.api.toggle_strict_mode(e.target.checked));
+  $("chkAutostart").onchange = (e) => runAction("chkAutostart", () => window.pywebview.api.toggle_autostart(e.target.checked));
+
+  $("cardEgress").onclick = () => state && state.warp.egress_v6 && window.pywebview.api.copy_text(state.warp.egress_v6).then((r) => showToast(r.message));
+  $("cardAdapter").onclick = () => state && state.warp.adapter_v6 && window.pywebview.api.copy_text(state.warp.adapter_v6).then((r) => showToast(r.message));
+
+  document.querySelectorAll(".tab").forEach((tab) => {
+    tab.onclick = () => {
+      document.querySelectorAll(".tab").forEach((t) => t.classList.remove("active"));
+      tab.classList.add("active");
+      activeTab = tab.getAttribute("data-tab");
+      renderLogs();
+    };
+  });
+
+  $("btnClearBlacklist").onclick = () => runAction("btnClearBlacklist", () => window.pywebview.api.clear_blacklist());
+  $("btnCopyLog").onclick = () => window.pywebview.api.copy_text($("logBox").textContent).then((r) => showToast(r.message));
+  $("btnOpenFolder").onclick = () => window.pywebview.api.open_logs_folder();
+  $("btnCopyDiag").onclick = () => state && window.pywebview.api.copy_text(JSON.stringify(state, null, 2)).then((r) => showToast("Copied full diagnostic JSON."));
+  $("btnInstallRepair").onclick = () => runAction("btnInstallRepair", () => window.pywebview.api.install_or_repair(), "Repairing...");
+  $("btnUninstall").onclick = () => {
+    confirmDialog(
+      "Uninstall Opencode Unlimited?",
+      "This removes background tasks, proxy overrides from service.json, shims, PATH entry, and %LOCALAPPDATA%\\opencode-unlimited. Your OpenCode projects, sessions, and Cloudflare WARP app remain untouched.",
+      () => runAction("btnUninstall", () => window.pywebview.api.uninstall_all(), "Removing...")
+    );
+  };
+
+  let isPollerStarted = false;
+  function startLifecycle() {
+    if (isPollerStarted) return;
+    isPollerStarted = true;
+    refresh(true);
+    setInterval(() => refresh(false), 3000);
+  }
+
+  // Handle immediate injection, pywebviewready event, and fallback interval
+  if (window.pywebview && window.pywebview.api) {
+    startLifecycle();
+  } else {
+    window.addEventListener("pywebviewready", startLifecycle);
+    let attempts = 0;
+    const pollTimer = setInterval(() => {
+      attempts++;
+      if (window.pywebview && window.pywebview.api) {
+        clearInterval(pollTimer);
+        startLifecycle();
+      } else if (attempts >= 15) {
+        clearInterval(pollTimer);
+      }
+    }, 200);
+  }
+</script>
+</body>
+</html>
