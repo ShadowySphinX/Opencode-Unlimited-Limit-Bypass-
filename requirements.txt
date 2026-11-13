@@ -1,0 +1,11 @@
+# Opencode Unlimited Dependencies
+# Core GUI & WebView runtime
+pywebview>=5.0.0
+pythonnet>=3.0.0
+clr_loader>=0.2.6
+
+# System & process monitoring
+psutil>=5.9.0
+
+# Build tools (only required if building standalone .exe from source)
+pyinstaller>=6.0.0
