@@ -55,6 +55,66 @@ def set_egress_config(
     return cfg
 
 
+PROXY_INDEX_FILE = LANE_DIR / "custom_proxy_index.txt"
+
+
+def parse_proxy_list(raw: str) -> list[tuple[str, int]]:
+    """Parse comma, semicolon, space, or newline delimited proxies."""
+    import re
+    items = re.split(r"[,;\s\n\r]+", raw.strip())
+    results = []
+    for item in items:
+        clean = item.strip()
+        if not clean:
+            continue
+        for prefix in ("socks5://", "socks5h://", "http://", "https://"):
+            if clean.lower().startswith(prefix):
+                clean = clean[len(prefix):]
+        clean = clean.strip("/ ")
+        phost, sep, pport_s = clean.rpartition(":")
+        if sep and pport_s.isdigit():
+            results.append((phost.strip("[] ") or "127.0.0.1", int(pport_s)))
+        elif clean.isdigit():
+            results.append(("127.0.0.1", int(clean)))
+    return results or [("127.0.0.1", 10808)]
+
+
+def get_current_custom_proxy() -> tuple[str, int, int, int]:
+    """Return (host, port, current_index, total_count)."""
+    cfg = get_egress_config()
+    raw = cfg.get("custom_proxy", "127.0.0.1:10808").strip()
+    proxies = parse_proxy_list(raw)
+    idx = 0
+    if PROXY_INDEX_FILE.is_file():
+        try:
+            idx = int(PROXY_INDEX_FILE.read_text(encoding="utf-8").strip())
+        except Exception:
+            idx = 0
+    idx = idx % len(proxies)
+    host, port = proxies[idx]
+    return host, port, idx, len(proxies)
+
+
+def rotate_custom_proxy() -> tuple[bool, str]:
+    """Rotate to the next proxy node in the custom proxy pool."""
+    ensure_dirs()
+    cfg = get_egress_config()
+    raw = cfg.get("custom_proxy", "127.0.0.1:10808").strip()
+    proxies = parse_proxy_list(raw)
+    if len(proxies) <= 1:
+        return True, f"Single proxy active ({proxies[0][0]}:{proxies[0][1]}). Add more proxies (comma-separated) to enable auto-cycling."
+    idx = 0
+    if PROXY_INDEX_FILE.is_file():
+        try:
+            idx = int(PROXY_INDEX_FILE.read_text(encoding="utf-8").strip())
+        except Exception:
+            idx = 0
+    new_idx = (idx + 1) % len(proxies)
+    PROXY_INDEX_FILE.write_text(str(new_idx), encoding="utf-8")
+    host, port = proxies[new_idx]
+    return True, f"Switched to proxy #{new_idx + 1}/{len(proxies)}: {host}:{port}"
+
+
 def open_http_proxy_tunnel(dest_host: str, dest_port: int, proxy_host: str, proxy_port: int, timeout: float = 12.0) -> socket.socket:
     """Connect to an upstream HTTP proxy and negotiate CONNECT tunnel."""
     s = socket.create_connection((proxy_host, proxy_port), timeout=timeout)
@@ -93,20 +153,7 @@ def open_multi_egress_upstream(host: str, port: int, warp_fallback_fn) -> socket
         return open_socks5_tunnel(host, port, socks_host=target[0], socks_port=target[1])
 
     if mode == "custom":
-        raw = cfg.get("custom_proxy", "127.0.0.1:10808").strip()
-        # Clean protocol prefixes if user pasted them
-        for prefix in ("socks5://", "socks5h://", "http://", "https://"):
-            if raw.lower().startswith(prefix):
-                raw = raw[len(prefix):]
-        raw = raw.strip("/ ")
-        phost, sep, pport_s = raw.rpartition(":")
-        if sep:
-            pport = int(pport_s) if pport_s.isdigit() else 10808
-            phost = phost.strip("[] ") or "127.0.0.1"
-        else:
-            pport = int(raw) if raw.isdigit() else 10808
-            phost = "127.0.0.1"
-
+        phost, pport, _, _ = get_current_custom_proxy()
         ptype = cfg.get("custom_type", "socks5").lower()
         if ptype == "http":
             return open_http_proxy_tunnel(host, port, phost, pport)

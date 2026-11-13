@@ -131,13 +131,23 @@ def _rotate(state: dict, warp_bin: str | None) -> None:
             append_log(GUARD_LOG_FILE, f"Tor rotation error: {exc}")
             return
 
-    # 2. Custom Proxy mode: record quota event
+    # 2. Custom Proxy mode: cycle proxy node in pool
     if mode == "custom":
-        append_log(GUARD_LOG_FILE, "wall detected in Custom Proxy mode — node quota limit reached")
-        state["last_hop"] = now
-        state["hops"] = int(state.get("hops", 0) or 0) + 1
-        _save_state(state)
-        return
+        append_log(GUARD_LOG_FILE, "wall detected in Custom Proxy mode — cycling proxy node")
+        try:
+            from proxy_chain import rotate_custom_proxy
+            ok, msg = rotate_custom_proxy()
+            state["last_hop"] = now
+            state["hops"] = int(state.get("hops", 0) or 0) + 1
+            _save_state(state)
+            append_log(GUARD_LOG_FILE, f"Custom proxy rotated #{state['hops']}: {msg}")
+            return
+        except Exception as exc:
+            append_log(GUARD_LOG_FILE, f"Custom proxy rotation error: {exc}")
+            state["last_hop"] = now
+            state["hops"] = int(state.get("hops", 0) or 0) + 1
+            _save_state(state)
+            return
 
     # 3. WARP / Clean Endpoint mode: rotate IPv6 /64 subnet
     if not warp_bin:

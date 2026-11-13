@@ -774,14 +774,16 @@
 
       <!-- Custom Proxy Sub-panel -->
       <div id="panelCustom" class="mode-subpanel" style="display:none;">
-        <div class="subpanel-row">
+        <div class="subpanel-row" style="flex-wrap:wrap;gap:8px;">
           <select id="selProxyType" class="select-sm" style="width:105px;">
             <option value="socks5">SOCKS5</option>
             <option value="http">HTTP</option>
           </select>
-          <input type="text" id="txtProxyAddr" class="input-sm" placeholder="127.0.0.1:10808" style="flex:1;" />
-          <button id="btnSaveCustomProxy" class="btn btn-sm btn-primary">Apply & Route</button>
+          <input type="text" id="txtProxyAddr" class="input-sm" placeholder="127.0.0.1:10808 (or multiple: 1.1.1.1:1080, 2.2.2.2:1080)" style="flex:1;min-width:240px;" />
+          <button id="btnSaveCustomProxy" class="btn btn-sm btn-primary">Apply &amp; Route</button>
+          <button id="btnRotateCustomProxy" class="btn btn-sm btn-hop" data-tip-title="Cycle Next Proxy Node" data-tip-body="Immediately switch to the next proxy node in your multi-proxy pool.">🔄 Next Node</button>
         </div>
+        <div id="customPoolStatus" class="stat-sub" style="margin-top:4px;font-size:11px;color:var(--dim);"></div>
       </div>
 
       <!-- Clean Endpoint Sub-panel -->
@@ -1272,6 +1274,13 @@
       $("txtProxyAddr").value = eg.custom_proxy;
       $("selProxyType").value = eg.custom_type || "socks5";
     }
+    if ($("customPoolStatus")) {
+      if (eg.custom_pool_count > 1) {
+        $("customPoolStatus").textContent = `Pool: ${eg.custom_pool_count} nodes configured | Active: ${eg.custom_current_node}`;
+      } else {
+        $("customPoolStatus").textContent = "Single proxy mode. Paste multiple proxies (comma-separated) to enable auto-cycling.";
+      }
+    }
 
     // Clean endpoints dropdown
     if (eg.clean_endpoints && eg.clean_endpoints.length > 0) {
@@ -1443,6 +1452,7 @@
     const ptype = $("selProxyType").value;
     runAction("btnSaveCustomProxy", () => window.pywebview.api.set_egress_mode("custom", addr, ptype), "Saving Proxy...");
   };
+  $("btnRotateCustomProxy").onclick = () => runAction("btnRotateCustomProxy", () => window.pywebview.api.rotate_custom_proxy(), "Cycling Node...");
 
   $("btnApplyCleanEndpoint").onclick = () => {
     const ep = $("selCleanEndpoint").value;

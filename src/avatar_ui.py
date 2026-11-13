@@ -413,11 +413,15 @@ class AvatarControlApi:
             from clean_endpoint import KNOWN_CLEAN_ENDPOINTS
             cfg = get_egress_config()
             target = get_active_tor_target()
+            from proxy_chain import get_current_custom_proxy
+            cur_h, cur_p, cur_i, cur_total = get_current_custom_proxy()
             return {
                 "mode": cfg.get("mode", "warp"),
                 "warp_scope": cfg.get("warp_scope", "isolated"),
                 "custom_proxy": cfg.get("custom_proxy", "127.0.0.1:10808"),
                 "custom_type": cfg.get("custom_type", "socks5"),
+                "custom_pool_count": cur_total,
+                "custom_current_node": f"{cur_h}:{cur_p} (#{cur_i + 1}/{cur_total})",
                 "tor_active": bool(target),
                 "tor_target": f"{target[0]}:{target[1]}" if target else "Not running",
                 "tor_running": is_portable_tor_running(),
@@ -465,6 +469,11 @@ class AvatarControlApi:
     def toggle_tor_service(self, enable: bool) -> dict:
         from tor_manager import start_portable_tor, stop_portable_tor
         ok, msg = start_portable_tor() if enable else stop_portable_tor()
+        return {"ok": ok, "message": msg}
+
+    def rotate_custom_proxy(self) -> dict:
+        from proxy_chain import rotate_custom_proxy
+        ok, msg = rotate_custom_proxy()
         return {"ok": ok, "message": msg}
 
     def set_clean_endpoint(self, endpoint: str) -> dict:
