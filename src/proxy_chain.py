@@ -135,11 +135,12 @@ def open_http_proxy_tunnel(dest_host: str, dest_port: int, proxy_host: str, prox
     if " 200 " not in status_line:
         s.close()
         raise ConnectionError(f"Upstream HTTP proxy rejected CONNECT: {status_line}")
+    s.settimeout(None)
     return s
 
 
 def open_multi_egress_upstream(host: str, port: int, warp_fallback_fn) -> socket.socket:
-    """Route an outbound connection according to the active egress mode."""
+    """Route an outbound connection according to the active egress mode with auto-healing and failover."""
     cfg = get_egress_config()
     mode = cfg.get("mode", "warp")
 
@@ -148,16 +149,50 @@ def open_multi_egress_upstream(host: str, port: int, warp_fallback_fn) -> socket
         if not target:
             ok, msg = start_portable_tor()
             if not ok:
+                if warp_fallback_fn and not (os.environ.get("OUC_STRICT_PROXY") == "1" or (LANE_DIR / "strict_proxy.flag").is_file()):
+                    return warp_fallback_fn(host, port)
                 raise ConnectionError(f"Could not connect via Tor: {msg}")
             target = get_active_tor_target() or ("127.0.0.1", 9050)
-        return open_socks5_tunnel(host, port, socks_host=target[0], socks_port=target[1])
+        try:
+            return open_socks5_tunnel(host, port, socks_host=target[0], socks_port=target[1], timeout=10.0)
+        except Exception:
+            if warp_fallback_fn and not (os.environ.get("OUC_STRICT_PROXY") == "1" or (LANE_DIR / "strict_proxy.flag").is_file()):
+                return warp_fallback_fn(host, port)
+            raise
 
     if mode == "custom":
-        phost, pport, _, _ = get_current_custom_proxy()
         ptype = cfg.get("custom_type", "socks5").lower()
-        if ptype == "http":
-            return open_http_proxy_tunnel(host, port, phost, pport)
-        return open_socks5_tunnel(host, port, socks_host=phost, socks_port=pport)
+        pool = cfg.get("custom_pool", [])
+        tries = max(1, len(pool))
+        last_err = None
+
+        for _ in range(tries):
+            phost, pport, idx, tot = get_current_custom_proxy()
+            if ptype == "http":
+                try:
+                    return open_http_proxy_tunnel(host, port, phost, pport, timeout=8.0)
+                except Exception as e:
+                    last_err = e
+            else:
+                try:
+                    return open_socks5_tunnel(host, port, socks_host=phost, socks_port=pport, timeout=4.0)
+                except Exception as e:
+                    last_err = e
+                    # Seamlessly fallback to HTTP CONNECT if SOCKS5 fails or was misconfigured
+                    try:
+                        return open_http_proxy_tunnel(host, port, phost, pport, timeout=5.0)
+                    except Exception:
+                        pass
+            # If current node failed and we have more nodes, advance pool to next node
+            if tot > 1:
+                rotate_custom_proxy()
+
+        if warp_fallback_fn and not (os.environ.get("OUC_STRICT_PROXY") == "1" or (LANE_DIR / "strict_proxy.flag").is_file()):
+            try:
+                return warp_fallback_fn(host, port)
+            except Exception:
+                pass
+        raise ConnectionError(f"All proxies in pool failed (last error: {last_err})")
 
     # Default: Cloudflare WARP IPv6 socket binding
     return warp_fallback_fn(host, port)

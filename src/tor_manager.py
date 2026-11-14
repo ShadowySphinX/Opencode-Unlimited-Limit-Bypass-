@@ -297,4 +297,6 @@ def open_socks5_tunnel(
         sock.recv(dlen + 2)
     elif atyp == 4:
         sock.recv(16 + 2)
+
+    sock.settimeout(None)
     return sock
