@@ -20,7 +20,15 @@ from ouc_common import (
     normalize_v6_64,
 )
 
-PINNED_HOSTS = {"opencode.ai", "www.opencode.ai", "api.opencode.ai"}
+PINNED_HOSTS = {
+    "opencode.ai",
+    "www.opencode.ai",
+    "api.opencode.ai",
+    "opencode.com",
+    "www.opencode.com",
+    "api.opencode.com",
+    "inference.opencode.ai",
+}
 
 
 class _WarpState:
@@ -107,22 +115,40 @@ class _ThreadedTCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
 
 
 def _relay(a: socket.socket, b: socket.socket) -> None:
-    """Bidirectionally forward bytes between two sockets until EOF or error."""
+    """Bidirectionally forward bytes between two sockets with graceful half-close handling."""
     sockets = [a, b]
+    closed = set()
     try:
-        while True:
+        while sockets:
             readable, _, exceptional = select.select(sockets, [], sockets, 60.0)
             if exceptional:
                 break
             if not readable:
-                continue
+                break
             for src in readable:
                 dst = b if src is a else a
-                data = src.recv(65536)
-                if not data:
-                    return
-                dst.sendall(data)
-    except OSError:
+                try:
+                    data = src.recv(65536)
+                except (OSError, ConnectionResetError):
+                    data = b""
+
+                if data:
+                    try:
+                        dst.sendall(data)
+                    except (OSError, ConnectionResetError):
+                        return
+                else:
+                    # EOF from src -> send TCP FIN to dst (half-close)
+                    closed.add(src)
+                    if src in sockets:
+                        sockets.remove(src)
+                    try:
+                        dst.shutdown(socket.SHUT_WR)
+                    except OSError:
+                        pass
+                    if len(closed) >= 2:
+                        return
+    except Exception:
         pass
 
 
@@ -152,25 +178,45 @@ def _open_warp_direct(
     except Exception:
         pass
 
-    # 1. If in Isolated (App-Only) mode, tunnel via local WARP SOCKS5 proxy (port 40000)
+    is_strict = os.environ.get("OUC_STRICT_PROXY") == "1" or (LANE_DIR / "strict_proxy.flag").is_file()
+    is_opencode_host = (
+        clean_host in PINNED_HOSTS
+        or clean_host.endswith(".opencode.ai")
+        or clean_host.endswith(".opencode.com")
+    )
+
+    # 1. Isolated (App-Only) mode: tunnel via local WARP SOCKS5 proxy (port 40000)
     if scope == "isolated":
         try:
             from tor_manager import open_socks5_tunnel
-            return open_socks5_tunnel(clean_host, port, socks_host="127.0.0.1", socks_port=40000)
+            return open_socks5_tunnel(clean_host, port, socks_host="127.0.0.1", socks_port=40000, timeout=8.0)
+        except Exception:
+            pass
+
+        # Auto-heal: attempt fast connection if WARP service dropped
+        try:
+            from warp_keeper import ensure_connected
+            ensure_connected()
+            from tor_manager import open_socks5_tunnel
+            return open_socks5_tunnel(clean_host, port, socks_host="127.0.0.1", socks_port=40000, timeout=6.0)
         except Exception:
             pass
 
     # 2. Full System TUN mode: bind explicitly to the WARP adapter's IPv6
-    if clean_host in PINNED_HOSTS or clean_host.endswith(".opencode.ai"):
+    if is_opencode_host:
         local_v6, pinned_edge = warp_state.get(wait_if_rotating=True)
-        if not local_v6:
-            # Fallback to local WARP SOCKS5 if available
+        if local_v6:
             try:
-                from tor_manager import open_socks5_tunnel
-                return open_socks5_tunnel(clean_host, port, socks_host="127.0.0.1", socks_port=40000)
+                return _open_pinned_v6(pinned_edge, port, local_v6)
             except Exception:
-                raise ConnectionRefusedError("Cloudflare WARP IPv6 tunnel unavailable (fail-closed)")
-        return _open_pinned_v6(pinned_edge, port, local_v6)
+                pass
+
+        # Fallback to local WARP SOCKS5 if available
+        try:
+            from tor_manager import open_socks5_tunnel
+            return open_socks5_tunnel(clean_host, port, socks_host="127.0.0.1", socks_port=40000, timeout=6.0)
+        except Exception:
+            pass
 
     local_v6, _ = warp_state.get(wait_if_rotating=False)
     if local_v6:
@@ -181,8 +227,31 @@ def _open_warp_direct(
         except Exception:
             pass
 
-    if os.environ.get("OUC_STRICT_PROXY") == "1" or (LANE_DIR / "strict_proxy.flag").is_file():
-        raise ConnectionRefusedError("Strict WARP-only mode: IPv6 route unavailable")
+    # 3. Resilient failover: If WARP is down, try active Tor before failing
+    try:
+        from tor_manager import get_active_tor_target, open_socks5_tunnel
+        tor_target = get_active_tor_target()
+        if tor_target:
+            return open_socks5_tunnel(clean_host, port, socks_host=tor_target[0], socks_port=tor_target[1], timeout=8.0)
+    except Exception:
+        pass
+
+    # 4. Strict fail-closed privacy mode: only fail if explicitly enabled by user
+    if is_strict:
+        raise ConnectionRefusedError("Cloudflare WARP tunnel unavailable (fail-closed strict mode)")
+
+    # 5. Resilient Direct Fallback:
+    # If WARP is unavailable/uninstalled, route directly so OpenCode NEVER throws 503 errors!
+    if is_opencode_host:
+        try:
+            _, pinned_edge = warp_state.get(wait_if_rotating=False)
+            sock = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+            sock.settimeout(6.0)
+            sock.connect((pinned_edge, port))
+            sock.settimeout(None)
+            return sock
+        except Exception:
+            pass
 
     sock = socket.create_connection((clean_host, port), timeout=12.0)
     sock.settimeout(None)
@@ -194,7 +263,7 @@ def _open_upstream(
     port: int,
     warp_state: _WarpState,
 ) -> socket.socket:
-    """Connect upstream: supports WARP IPv6, Tor, and Custom SOCKS5/HTTP."""
+    """Connect upstream: supports WARP IPv6, Tor, and Custom SOCKS5/HTTP with resilient fallback."""
     clean_host = host.strip("[]").lower()
     if clean_host in ("127.0.0.1", "localhost", "::1"):
         sock = socket.create_connection((clean_host, port), timeout=10.0)
@@ -205,18 +274,20 @@ def _open_upstream(
         from proxy_chain import get_egress_config, open_multi_egress_upstream
         cfg = get_egress_config()
         if cfg.get("mode") in ("tor", "custom"):
-            return open_multi_egress_upstream(
-                host,
-                port,
-                lambda h, p: _open_warp_direct(h, p, warp_state),
-            )
-    except Exception as exc:
-        try:
-            cfg = get_egress_config()
-            if cfg.get("mode") in ("tor", "custom"):
-                raise ConnectionRefusedError(f"Multi-egress ({cfg.get('mode')}) upstream error: {exc}")
-        except Exception:
-            pass
+            try:
+                return open_multi_egress_upstream(
+                    host,
+                    port,
+                    lambda h, p: _open_warp_direct(h, p, warp_state),
+                )
+            except Exception as exc:
+                is_strict = os.environ.get("OUC_STRICT_PROXY") == "1" or (LANE_DIR / "strict_proxy.flag").is_file()
+                if is_strict:
+                    raise ConnectionRefusedError(f"Multi-egress ({cfg.get('mode')}) upstream error: {exc}")
+                # Fall back to resilient direct path if upstream proxy dropped
+                return _open_warp_direct(clean_host, port, warp_state)
+    except Exception:
+        pass
 
     return _open_warp_direct(clean_host, port, warp_state)
 

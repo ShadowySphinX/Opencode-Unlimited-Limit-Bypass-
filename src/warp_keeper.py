@@ -47,6 +47,28 @@ def ensure_connected(warp_bin: str) -> bool:
         run_warp(["connect"], warp_bin=warp_bin)
         time.sleep(3)
         connected, _, _ = warp_status(warp_bin)
+        if connected:
+            return True
+
+        # If still not connected, registration might be stale or default endpoint blocked
+        append_log(KEEPER_LOG_FILE, "isolated tunnel not connected — attempting repair & clean endpoint check")
+        run_warp(["disconnect"], warp_bin=warp_bin)
+        run_warp(["registration", "delete"], warp_bin=warp_bin)
+        rc, msg = run_warp(["registration", "new"], warp_bin=warp_bin)
+        if rc != 0:
+            append_log(KEEPER_LOG_FILE, f"isolated registration new failed: {msg}")
+            try:
+                from clean_endpoint import auto_heal_warp_endpoint
+                heal_ok, heal_msg = auto_heal_warp_endpoint()
+                append_log(KEEPER_LOG_FILE, f"clean endpoint heal: {heal_msg}")
+            except Exception:
+                pass
+
+        run_warp(["mode", "proxy"], warp_bin=warp_bin)
+        run_warp(["proxy", "port", "40000"], warp_bin=warp_bin)
+        run_warp(["connect"], warp_bin=warp_bin)
+        time.sleep(4)
+        connected, _, _ = warp_status(warp_bin)
         return connected
 
     # Full System TUN mode

@@ -187,10 +187,19 @@ fi
 sw status || die "passwordless warp-cli did not work — check $SUDOERS_FILE"
 ok "passwordless warp-cli works"
 
-# ---------------------------------------------------------------- warp: register + TUN mode + connect
-say "registering warp + tunnel up"
+# ---------------------------------------------------------------- warp: register + isolated proxy mode + connect
+say "registering warp + isolated proxy up"
 sw registration new >/dev/null 2>&1   # already-registered boxes just error, fine
-sw mode warp
+
+# Detect VPS or SSH session to protect remote connectivity
+IS_VPS=0
+if [ -n "${SSH_CLIENT:-}" ] || [ -n "${SSH_TTY:-}" ] || [ -n "${SSH_CONNECTION:-}" ] || [ -f /etc/cloud/cloud.cfg ] || [ -d /var/lib/cloud ]; then
+  IS_VPS=1
+  say "VPS / SSH environment detected: enforcing isolated proxy mode (port 40000) to protect SSH access"
+fi
+
+sw mode proxy
+sw proxy port 40000
 sw connect
 CONNECTED=0
 for i in $(seq 1 10); do
@@ -198,7 +207,7 @@ for i in $(seq 1 10); do
   swo status | head -1 | grep -q Connected && { CONNECTED=1; break; }
 done
 [ "$CONNECTED" = 1 ] \
-  && ok "warp tunnel: connected (TUN mode)" \
+  && ok "warp tunnel: connected (isolated proxy mode on port 40000)" \
   || say "warp not up yet — the keeper will keep retrying every 45s"
 
 # ---------------------------------------------------------------- keeper (root service)

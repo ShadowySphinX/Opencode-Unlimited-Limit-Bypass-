@@ -756,9 +756,17 @@ class AvatarControlApi:
         flag = LANE_DIR / "strict_proxy.flag"
         if enable:
             flag.write_text("1\n", encoding="utf-8")
-            return {"ok": True, "message": "Strict WARP-only proxy mode enabled (all non-LAN hosts require WARP IPv6)."}
+            return {"ok": True, "message": "Strict fail-closed mode enabled (all requests require active WARP tunnel)."}
         flag.unlink(missing_ok=True)
-        return {"ok": True, "message": "Strict WARP-only mode disabled (opencode.ai remains strictly fail-closed on WARP IPv6)."}
+        return {"ok": True, "message": "Resilient fallback mode enabled (automatic bypass prevents 503 errors if WARP drops)."}
+
+    def auto_heal_endpoint(self) -> dict:
+        try:
+            from clean_endpoint import auto_heal_warp_endpoint
+            ok, msg = auto_heal_warp_endpoint()
+            return {"ok": ok, "message": msg}
+        except Exception as exc:
+            return {"ok": False, "message": f"Auto-heal failed: {exc}"}
 
     def reroll_edge(self) -> dict:
         ensure_dirs()

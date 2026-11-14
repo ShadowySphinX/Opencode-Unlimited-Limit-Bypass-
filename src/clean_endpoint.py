@@ -94,3 +94,33 @@ def reset_custom_endpoint() -> tuple[bool, str]:
         run_warp(["connect"], warp_bin=warp_bin)
         return True, "Cloudflare WARP endpoint reset to default."
     return False, f"Failed to reset endpoint: {msg}"
+
+
+def auto_heal_warp_endpoint(timeout: float = 1.0) -> tuple[bool, str]:
+    """Benchmark clean endpoints concurrently and connect to the fastest available one."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    results: list[tuple[float, str]] = []
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        future_map = {
+            executor.submit(test_endpoint_latency, ep, timeout): ep
+            for ep in KNOWN_CLEAN_ENDPOINTS
+        }
+        for fut in future_map:
+            ep = future_map[fut]
+            try:
+                lat = fut.result()
+                if lat is not None:
+                    results.append((lat, ep))
+            except Exception:
+                pass
+
+    if not results:
+        return False, "No responsive clean endpoints found."
+
+    results.sort(key=lambda x: x[0])
+    fastest_lat, fastest_ep = results[0]
+    ok, msg = set_custom_endpoint(fastest_ep)
+    if ok:
+        return True, f"Auto-healed connection using {fastest_ep} ({fastest_lat}ms)"
+    return False, msg

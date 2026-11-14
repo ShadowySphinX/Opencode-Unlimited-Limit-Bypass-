@@ -794,6 +794,7 @@
           </select>
           <button id="btnTestCleanPing" class="btn btn-sm">⚡ Ping Test</button>
           <button id="btnApplyCleanEndpoint" class="btn btn-sm btn-primary">Apply Endpoint</button>
+          <button id="btnAutoHealEndpoint" class="btn btn-sm" style="border-color:var(--emerald);color:var(--emerald);">⚡ Auto-Heal (Fastest)</button>
           <button id="btnResetCleanEndpoint" class="btn btn-sm btn-danger">Reset Default</button>
         </div>
         <div id="cleanPingResult" class="stat-sub" style="margin-top:6px;color:var(--cyan);font-family:var(--mono);font-size:11px;max-height:110px;overflow-y:auto;background:rgba(0,0,0,0.3);padding:6px 8px;border-radius:4px;border:1px solid rgba(0,255,255,0.15);display:none;"></div>
@@ -950,11 +951,11 @@
           </div>
 
           <div class="ctrl-row"
-               data-tip-title="Strict All-Traffic WARP Proxy Mode"
-               data-tip-body="When ON, zen-proxy refuses non-opencode.ai hosts too unless WARP IPv6 is active. When OFF, opencode.ai is strictly fail-closed while normal IPv4 tools (e.g., npm/local) still connect if needed.">
+               data-tip-title="Strict Fail-Closed Mode"
+               data-tip-body="When ON, proxy enforces strict fail-closed privacy (refuses connections if WARP is down). When OFF (Recommended), resilient fallback prevents 503 tunnel errors and keeps OpenCode responsive even if WARP drops.">
             <div class="ctrl-info">
-              <div class="ctrl-title">Strict All-Hosts WARP <span id="strictTag" class="tag">...</span></div>
-              <div class="ctrl-desc">Fail-closed for non-opencode.ai domains inside proxy too</div>
+              <div class="ctrl-title">Strict Fail-Closed Mode <span id="strictTag" class="tag">...</span></div>
+              <div class="ctrl-desc">Off = resilient auto-fallback (no 503 crashes); On = strict leak protection</div>
             </div>
             <label class="switch">
               <input type="checkbox" id="chkStrict" />
@@ -1459,6 +1460,7 @@
     if (!ep) return;
     runAction("btnApplyCleanEndpoint", () => window.pywebview.api.set_clean_endpoint(ep), "Setting Endpoint...");
   };
+  $("btnAutoHealEndpoint").onclick = () => runAction("btnAutoHealEndpoint", () => window.pywebview.api.auto_heal_endpoint(), "Healing Endpoint...");
   $("btnResetCleanEndpoint").onclick = () => runAction("btnResetCleanEndpoint", () => window.pywebview.api.reset_clean_endpoint(), "Resetting...");
   $("btnTestCleanPing").onclick = () => {
     $("cleanPingResult").style.display = "block";
