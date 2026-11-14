@@ -59,6 +59,18 @@ def _save_state(state: dict) -> None:
         pass
 
 
+def _dispatch_auto_resume() -> None:
+    """Dispatches 'continue' to the active OpenCode session once the limit is bypassed."""
+    try:
+        from auto_resume import resume_active_session, is_auto_resume_enabled
+        if is_auto_resume_enabled():
+            time.sleep(1.5)
+            ok, res_msg = resume_active_session()
+            append_log(GUARD_LOG_FILE, f"[auto-resume] Limit bypassed -> {res_msg}")
+    except Exception as exc:
+        append_log(GUARD_LOG_FILE, f"[auto-resume] note: {exc}")
+
+
 def _blacklist_add(state: dict, addr: str) -> None:
     prefix = normalize_v6_64(addr)
     if not prefix:
@@ -136,6 +148,7 @@ def _rotate(state: dict, warp_bin: str | None) -> None:
             state["hops"] = int(state.get("hops", 0) or 0) + 1
             _save_state(state)
             append_log(GUARD_LOG_FILE, f"Tor rotated #{state['hops']}: {msg}")
+            _dispatch_auto_resume()
             return
         except Exception as exc:
             append_log(GUARD_LOG_FILE, f"Tor rotation error: {exc}")
@@ -151,6 +164,7 @@ def _rotate(state: dict, warp_bin: str | None) -> None:
             state["hops"] = int(state.get("hops", 0) or 0) + 1
             _save_state(state)
             append_log(GUARD_LOG_FILE, f"Custom proxy rotated #{state['hops']}: {msg}")
+            _dispatch_auto_resume()
             return
         except Exception as exc:
             append_log(GUARD_LOG_FILE, f"Custom proxy rotation error: {exc}")
@@ -202,6 +216,7 @@ def _rotate(state: dict, warp_bin: str | None) -> None:
             (LANE_DIR / "edge_reroll").write_text(str(time.time()), encoding="utf-8")
         except Exception:
             pass
+        _dispatch_auto_resume()
     else:
         _save_state(state)
         append_log(

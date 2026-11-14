@@ -969,6 +969,19 @@
           </div>
 
           <div class="ctrl-row"
+               data-tip-title="Auto-Resume on Bypass (Walk-Away Mode)"
+               data-tip-body="Automatically detects when the rate limit wall is bypassed, and dispatches a 'continue' prompt to your active OpenCode chat (via CLI and keystroke) so the model keeps generating without you needing to sit at your PC.">
+            <div class="ctrl-info">
+              <div class="ctrl-title">Auto-Resume on Bypass <span id="autoResumeTag" class="tag ok">Active</span></div>
+              <div class="ctrl-desc">Automatically sends 'continue' when limits rotate (walk-away mode)</div>
+            </div>
+            <label class="switch">
+              <input type="checkbox" id="chkAutoResume" checked />
+              <span class="slider"></span>
+            </label>
+          </div>
+
+          <div class="ctrl-row"
                data-tip-title="Auto-Start at Windows Login"
                data-tip-body="Registers OpencodeUnlimited-Keeper and OpencodeUnlimited-Guard in Windows Task Scheduler (AtLogOn) so protection starts silently on every reboot.">
             <div class="ctrl-info">
@@ -1207,6 +1220,8 @@
     );
     setTag($("fwTag"), sv.firewall_installed ? "Enabled" : "Off", sv.firewall_installed ? "ok" : "");
     setTag($("strictTag"), ln.strict_mode ? "Strict" : "Standard", ln.strict_mode ? "ok" : "");
+    const autoResume = (sv && sv.auto_resume !== undefined) ? sv.auto_resume : true;
+    setTag($("autoResumeTag"), autoResume ? "Active" : "Disabled", autoResume ? "ok" : "dim");
     setTag($("autoTag"), sv.keeper_task && sv.guard_task ? "Enabled" : "Off", sv.keeper_task && sv.guard_task ? "ok" : "warn");
 
     if (!busyIds.has("chkKeeper")) $("chkKeeper").checked = sv.keeper_running;
@@ -1214,6 +1229,7 @@
     if (!busyIds.has("chkServiceProxy")) $("chkServiceProxy").checked = ln.desktop_service_wired;
     if (!busyIds.has("chkFirewall")) $("chkFirewall").checked = sv.firewall_installed;
     if (!busyIds.has("chkStrict")) $("chkStrict").checked = ln.strict_mode;
+    if (!busyIds.has("chkAutoResume")) $("chkAutoResume").checked = autoResume;
     if (!busyIds.has("chkAutostart")) $("chkAutostart").checked = sv.keeper_task && sv.guard_task;
 
     setTag($("pathBadge"), ln.path_wired ? "PATH: Wired" : "PATH: Not First", ln.path_wired ? "ok" : "warn");
@@ -1499,6 +1515,7 @@
   $("chkServiceProxy").onchange = (e) => runAction("chkServiceProxy", () => window.pywebview.api.toggle_desktop_service_proxy(e.target.checked));
   $("chkFirewall").onchange = (e) => runAction("chkFirewall", () => window.pywebview.api.toggle_firewall(e.target.checked));
   $("chkStrict").onchange = (e) => runAction("chkStrict", () => window.pywebview.api.toggle_strict_mode(e.target.checked));
+  $("chkAutoResume").onchange = (e) => runAction("chkAutoResume", () => window.pywebview.api.toggle_auto_resume(e.target.checked));
   $("chkAutostart").onchange = (e) => runAction("chkAutostart", () => window.pywebview.api.toggle_autostart(e.target.checked));
 
   $("cardEgress").onclick = () => state && state.warp.egress_v6 && window.pywebview.api.copy_text(state.warp.egress_v6).then((r) => showToast(r.message));

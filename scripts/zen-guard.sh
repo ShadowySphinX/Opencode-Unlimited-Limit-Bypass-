@@ -163,6 +163,11 @@ while true; do
       H=$(state_get hops); H=${H:-0}; H=$((H + 1))
       state_set hops "$H"
       glog "rotated #$H: $OLD → $NEW ✓"
+      sleep 2
+      if command -v opencode >/dev/null 2>&1; then
+        nohup opencode run --continue "continue" >/dev/null 2>&1 &
+        glog "[auto-resume] Limit bypassed -> sent 'continue' to active session ✓"
+      fi
     else
       state_set last_hop "$NOW"
       glog "rotation failed — keeper will keep the tunnel alive, retrying next tick"

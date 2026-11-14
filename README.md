@@ -11,6 +11,7 @@ OpenCode enforces free-tier message limits based on your inbound IP address (`/6
 
 ## What's New in v2.3.0
 
+* **Auto-Resume & Walk-Away Automation:** When OpenCode hits a rate limit and rotates your identity, Zen Guard automatically sends `continue` to your running session (via CLI session tracking and keystroke injection). You can start long tasks, walk away from your PC, and the model continues uninterrupted.
 * **Multi-Proxy Pool & Round-Robin Cycling:** Custom Proxy mode now supports full proxy pools (comma, semicolon, or newline separated). When an IP hits a rate wall, the background watcher immediately switches to the next node in the pool.
 * **App-Only (Isolated Mode) by Default:** Only OpenCode traffic routes through the local proxy (`127.0.0.1:40000`). Games, Discord, browsers, and other apps run on your direct internet connection without latency spikes or drops during IP rotations.
 * **Full System TUN Mode Toggle:** An option remains to route the entire operating system through Cloudflare WARP for users who need system-wide routing.

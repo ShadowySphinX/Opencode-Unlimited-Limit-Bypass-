@@ -378,6 +378,7 @@ class AvatarControlApi:
                 "proxy_port": SERVICE_PROXY_PORT,
                 "firewall_installed": is_killswitch_installed(),
                 "is_admin": is_admin(),
+                "auto_resume": self._is_auto_resume_active(),
             },
             "lane": {
                 "pinned_edge": pinned_edge,
@@ -750,6 +751,28 @@ class AvatarControlApi:
                 else "Firewall update sent; refresh status in a moment."
             ),
         }
+
+    def _is_auto_resume_active(self) -> bool:
+        try:
+            from auto_resume import is_auto_resume_enabled
+            return is_auto_resume_enabled()
+        except Exception:
+            return True
+
+    def toggle_auto_resume(self, enable: bool) -> dict:
+        try:
+            from auto_resume import set_auto_resume
+            set_auto_resume(enable)
+            return {
+                "ok": True,
+                "message": (
+                    "Auto-resume enabled — OpenCode Unlimited will automatically send 'continue' when limits are bypassed."
+                    if enable
+                    else "Auto-resume disabled."
+                ),
+            }
+        except Exception as exc:
+            return {"ok": False, "message": f"Failed setting auto-resume: {exc}"}
 
     def toggle_strict_mode(self, enable: bool) -> dict:
         ensure_dirs()
