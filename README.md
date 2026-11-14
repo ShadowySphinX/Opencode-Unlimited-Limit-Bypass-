@@ -49,7 +49,7 @@ This tool monitors OpenCode logs in real time, catches quota and rate-limit erro
 
 ---
 
-## Restricted Countries Guide (Russia, Iran, China)
+## Restricted Countries Guide (Russia, Iran, China and others)
 
 If your local ISP blocks or throttles Cloudflare WARP UDP traffic, choose one of these three solutions directly inside the app:
 
