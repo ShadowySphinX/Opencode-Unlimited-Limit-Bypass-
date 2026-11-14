@@ -826,6 +826,42 @@ class AvatarControlApi:
         except Exception as exc:
             return {"ok": False, "message": f"Auto-heal failed: {exc}"}
 
+    def repair_warp_connection(self) -> dict:
+        """Purges stale cryptographic keys, resets endpoint overrides, and auto-repairs MITM errors."""
+        wb = find_warp_cli()
+        if not wb:
+            return {"ok": False, "message": "warp-cli.exe not found."}
+        try:
+            scope = "isolated"
+            try:
+                from proxy_chain import get_egress_config
+                scope = get_egress_config().get("warp_scope", "isolated")
+            except Exception:
+                pass
+
+            run_warp(["disconnect"], warp_bin=wb)
+            run_warp(["tunnel", "endpoint", "reset"], warp_bin=wb)
+            run_warp(["tunnel", "protocol", "reset"], warp_bin=wb)
+            run_warp(["registration", "delete"], warp_bin=wb)
+            run_warp(["registration", "new"], warp_bin=wb)
+            if scope == "isolated":
+                run_warp(["mode", "proxy"], warp_bin=wb)
+                run_warp(["proxy", "port", "40000"], warp_bin=wb)
+            else:
+                run_warp(["mode", "warp"], warp_bin=wb)
+            run_warp(["connect"], warp_bin=wb)
+
+            for _ in range(8):
+                time.sleep(1.0)
+                conn, _, _ = warp_status(wb)
+                if conn:
+                    self._refresh_egress_async(force=True)
+                    return {"ok": True, "message": f"WARP keys & endpoints reset successfully. Connected ({'App-Only proxy' if scope == 'isolated' else 'TUN'})!"}
+
+            return {"ok": True, "message": "WARP reset executed. Reconnecting in background..."}
+        except Exception as exc:
+            return {"ok": False, "message": f"Repair failed: {exc}"}
+
     def reroll_edge(self) -> dict:
         ensure_dirs()
         (LANE_DIR / "edge_override.txt").write_text("auto\n", encoding="utf-8")

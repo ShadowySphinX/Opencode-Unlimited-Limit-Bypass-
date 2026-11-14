@@ -828,6 +828,11 @@
               data-tip-body="Safely archives session cache, wipes rate-limit lock files, and immediately rotates your IP. Resolves stubborn quota limits when standard hops don't clear them.">
         ⚡ Deep Reset
       </button>
+      <button id="btnRepairWarp" class="btn" style="border-color:var(--emerald);color:var(--emerald);"
+              data-tip-title="Fix WARP / Clear MITM Block"
+              data-tip-body="Resets endpoint overrides, purges stale cryptographic registration keys, and reconnects cleanly. Resolves CF_HAPPY_EYEBALLS_MITM_FAILURE and 'Unable to reach destination' blocks.">
+        ⚡ Fix WARP (Reset Keys)
+      </button>
     </section>
 
     <!-- Live Telemetry Cards -->
@@ -1506,6 +1511,9 @@
     if (confirm("Deep Reset archives session cache and immediately rotates your identity. Proceed?")) {
       runAction("btnDeepReset", () => window.pywebview.api.deep_reset_identity(), "Resetting Identity...");
     }
+  };
+  $("btnRepairWarp").onclick = () => {
+    runAction("btnRepairWarp", () => window.pywebview.api.repair_warp_connection(), "Fixing WARP Keys...");
   };
   $("btnRerollEdge").onclick = () => runAction("btnRerollEdge", () => window.pywebview.api.reroll_edge(), "...");
   $("edgeSelect").onchange = (e) => runAction("edgeSelect", () => window.pywebview.api.set_edge_override(e.target.value));
