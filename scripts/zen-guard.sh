@@ -56,7 +56,18 @@ except: d={'blacklist':[],'offset':0,'last_hop':0,'hops':0,'current':''}
 d['$1']=sys.argv[1]
 json.dump(d,open('$STATE','w'))" "$2" 2>/dev/null; }
 
-cur_v6(){ timeout 10 curl -s -m 8 https://api64.ipify.org 2>/dev/null; }
+IS_VPS=0
+if [ -n "${SSH_CLIENT:-}" ] || [ -n "${SSH_TTY:-}" ] || [ -n "${SSH_CONNECTION:-}" ] || [ -f /etc/cloud/cloud.cfg ] || [ -d /var/lib/cloud ] || wo settings 2>/dev/null | grep -qi "proxy"; then
+  IS_VPS=1
+fi
+
+cur_v6(){
+  if [ "$IS_VPS" = "1" ]; then
+    timeout 10 curl -x socks5h://127.0.0.1:40000 -s -m 8 https://api64.ipify.org 2>/dev/null || timeout 10 curl -x http://127.0.0.1:41987 -s -m 8 https://api64.ipify.org 2>/dev/null
+  else
+    timeout 10 curl -s -m 8 https://api64.ipify.org 2>/dev/null
+  fi
+}
 
 # blacklist entries are /64-normalized (first 4 groups) — same mohalla,
 # same bucket. comparing full addresses was the original bug: the same
@@ -96,7 +107,12 @@ hop_once(){
     w registration new && { ok=1; break; }
     sleep 6
   done
-  w mode warp
+  if [ "$IS_VPS" = "1" ]; then
+    w mode proxy
+    w proxy port 40000
+  else
+    w mode warp
+  fi
   w connect
   svc start "$KEEPER"
   [ "$ok" = 1 ] || { echo ""; return; }
@@ -128,7 +144,7 @@ while true; do
   NEWBYTES=$((SIZE - OFF))
   WALL=0
   if [ "$NEWBYTES" -gt 0 ] && [ "$NEWBYTES" -lt 50000000 ]; then
-    if tail -c +"$((OFF + 1))" "$LOGF" 2>/dev/null | grep -E -aqi "QuotaExceeded|Quota Exceeded|quota_exceeded|Free usage limit|Free usage exceeded|Rate limit exceeded|rate_limit_exceeded|429 too many requests|free-tier usage limit"; then
+    if tail -c +"$((OFF + 1))" "$LOGF" 2>/dev/null | grep -E -aqi "QuotaExceeded|quota_exceeded|Free usage limit|usage limit reached|Rate limit|rate_limit|too many requests|status=429|\"status\":429|credits exhausted|free-tier usage"; then
       WALL=1
     fi
   fi

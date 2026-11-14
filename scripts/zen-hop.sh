@@ -26,7 +26,18 @@ wo(){ sudo -n "$WARP" --accept-tos "$@" 2>/dev/null && return 0; sudo -n "$WARP"
 restore(){ sudo -n systemctl start "$KEEPER" >/dev/null 2>&1 || sudo systemctl start "$KEEPER" >/dev/null 2>&1; }
 trap restore EXIT
 
-cur_v6(){ timeout 10 curl -s -m 8 https://api64.ipify.org 2>/dev/null; }
+IS_VPS=0
+if [ -n "${SSH_CLIENT:-}" ] || [ -n "${SSH_TTY:-}" ] || [ -n "${SSH_CONNECTION:-}" ] || [ -f /etc/cloud/cloud.cfg ] || [ -d /var/lib/cloud ] || wo settings 2>/dev/null | grep -qi "proxy"; then
+  IS_VPS=1
+fi
+
+cur_v6(){
+  if [ "$IS_VPS" = "1" ]; then
+    timeout 10 curl -x socks5h://127.0.0.1:40000 -s -m 8 https://api64.ipify.org 2>/dev/null || timeout 10 curl -x http://127.0.0.1:41987 -s -m 8 https://api64.ipify.org 2>/dev/null
+  else
+    timeout 10 curl -s -m 8 https://api64.ipify.org 2>/dev/null
+  fi
+}
 
 OLD_V6=$(cur_v6)
 echo "old /64: ${OLD_V6:-?}"
@@ -41,7 +52,12 @@ for i in 1 2 3 4 5; do
   echo "  attempt $i failed"; sleep 8
 done
 [ "$NEW" = 1 ] || { echo "-- registration failed — keeper will keep retrying --"; exit 1; }
-w mode warp
+if [ "$IS_VPS" = "1" ]; then
+  w mode proxy
+  w proxy port 40000
+else
+  w mode warp
+fi
 w connect
 
 for i in $(seq 1 20); do
