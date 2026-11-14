@@ -61,9 +61,58 @@ def get_latest_session_info() -> tuple[str, str, str] | None:
 
 def send_continue_keystroke() -> bool:
     """Send 'continue{ENTER}' to any active OpenCode Desktop or Terminal window."""
+    # 1. Native Windows Win32 API window focus and key dispatch
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        user32 = ctypes.windll.user32
+        target_hwnds = []
+
+        def _enum_cb(hwnd, _):
+            if user32.IsWindowVisible(hwnd):
+                length = user32.GetWindowTextLengthW(hwnd)
+                buf = ctypes.create_unicode_buffer(length + 1)
+                user32.GetWindowTextW(hwnd, buf, length + 1)
+                title = buf.value.lower()
+                pid = wintypes.DWORD()
+                user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+                pname = ""
+                try:
+                    import psutil
+                    pname = psutil.Process(pid.value).name().lower()
+                except Exception:
+                    pass
+                if "opencode" in pname or "opencode" in title or "terminal" in pname or "terminal" in title:
+                    target_hwnds.append((hwnd, buf.value, pname))
+            return True
+
+        CB_TYPE = ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
+        user32.EnumWindows(CB_TYPE(_enum_cb), 0)
+
+        for hwnd, title, pname in target_hwnds:
+            # SW_RESTORE = 9
+            user32.ShowWindow(hwnd, 9)
+            user32.SetForegroundWindow(hwnd)
+            time.sleep(0.3)
+            ps_send = """
+            Add-Type -AssemblyName System.Windows.Forms
+            [System.Windows.Forms.SendKeys]::SendWait("continue{ENTER}")
+            """
+            subprocess.run(
+                ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps_send],
+                capture_output=True,
+                creationflags=0x08000000,
+                timeout=4.0,
+            )
+            return True
+    except Exception:
+        pass
+
+    # 2. PowerShell WScript.Shell AppActivate fallback
     ps = """
     $ws = New-Object -ComObject WScript.Shell
-    $targets = @("OpenCode", "opencode", "Terminal", "PowerShell", "Command Prompt", "Alacritty")
+    $targets = @("OpenCode", "opencode", "ai.opencode", "Terminal", "PowerShell", "Command Prompt", "Alacritty")
     $sent = $false
     foreach ($t in $targets) {
         if ($ws.AppActivate($t)) {
@@ -81,7 +130,7 @@ def send_continue_keystroke() -> bool:
             ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps],
             capture_output=True,
             text=True,
-            timeout=6.0,
+            timeout=5.0,
             creationflags=CREATE_NO_WINDOW,
         )
         return "SENT" in res.stdout

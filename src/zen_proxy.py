@@ -189,7 +189,7 @@ def _open_warp_direct(
     if scope == "isolated":
         try:
             from tor_manager import open_socks5_tunnel
-            return open_socks5_tunnel(clean_host, port, socks_host="127.0.0.1", socks_port=40000, timeout=8.0)
+            return open_socks5_tunnel(clean_host, port, socks_host="127.0.0.1", socks_port=40000, timeout=6.0)
         except Exception:
             pass
 
@@ -241,19 +241,21 @@ def _open_warp_direct(
         raise ConnectionRefusedError("Cloudflare WARP tunnel unavailable (fail-closed strict mode)")
 
     # 5. Resilient Direct Fallback:
-    # If WARP is unavailable/uninstalled, route directly so OpenCode NEVER throws 503 errors!
+    # If WARP is unavailable or dropped, route directly so OpenCode NEVER throws 503 errors!
     if is_opencode_host:
         try:
             _, pinned_edge = warp_state.get(wait_if_rotating=False)
-            sock = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
-            sock.settimeout(6.0)
-            sock.connect((pinned_edge, port))
-            sock.settimeout(None)
-            return sock
+            if pinned_edge and ":" in pinned_edge:
+                sock = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+                sock.settimeout(4.0)
+                sock.connect((pinned_edge, port))
+                sock.settimeout(None)
+                return sock
         except Exception:
             pass
 
-    sock = socket.create_connection((clean_host, port), timeout=12.0)
+    # Direct standard dual-stack connection (IPv4/IPv6)
+    sock = socket.create_connection((clean_host, port), timeout=10.0)
     sock.settimeout(None)
     return sock
 

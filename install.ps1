@@ -197,6 +197,7 @@ function Invoke-Warp([string[]]$WarpArgs) {
 if (-not $SkipWarmCheck) {
     Say "configuring Cloudflare WARP in TUN mode..."
     Invoke-Warp @("registration", "new") | Out-Null
+    Invoke-Warp @("tunnel", "protocol", "set", "WireGuard") | Out-Null
     Invoke-Warp @("mode", "warp") | Out-Null
     Invoke-Warp @("connect") | Out-Null
     $Connected = $false

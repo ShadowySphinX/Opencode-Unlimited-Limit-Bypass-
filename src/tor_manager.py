@@ -53,15 +53,26 @@ def test_socks5_alive(port: int, host: str = "127.0.0.1", timeout: float = 1.2) 
 
 
 def find_tor_exe() -> Path | None:
-    """Locate portable tor.exe inside the local state folder."""
-    candidates = (
+    """Locate portable or installed tor.exe across system and portable paths."""
+    candidates = [
         TOR_DIR / "tor" / "tor.exe",
         TOR_DIR / "Tor" / "tor.exe",
         TOR_DIR / "tor.exe",
-    )
+        Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "Tor Browser" / "Browser" / "TorBrowser" / "Tor" / "tor.exe",
+        Path(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")) / "Tor Browser" / "Browser" / "TorBrowser" / "Tor" / "tor.exe",
+        Path.home() / "Desktop" / "Tor Browser" / "Browser" / "TorBrowser" / "Tor" / "tor.exe",
+        Path.home() / "OneDrive" / "Desktop" / "Tor Browser" / "Browser" / "TorBrowser" / "Tor" / "tor.exe",
+        Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / "Tor Browser" / "Browser" / "TorBrowser" / "Tor" / "tor.exe",
+    ]
     for c in candidates:
         if c.is_file():
             return c
+
+    # System PATH lookup
+    system_tor = shutil.which("tor.exe") or shutil.which("tor")
+    if system_tor and os.path.isfile(system_tor):
+        return Path(system_tor)
+
     # Recursive search if unzipped in custom subfolder
     if TOR_DIR.is_dir():
         for p in TOR_DIR.rglob("tor.exe"):
@@ -79,25 +90,30 @@ def get_active_tor_target() -> tuple[str, int] | None:
     return None
 
 
-def fetch_tor_bundle_url() -> str | None:
-    """Get the official Tor Expert Bundle download URL from Tor project updater."""
+def fetch_tor_bundle_url() -> list[str]:
+    """Get list of mirror download URLs for Tor Expert Bundle."""
+    urls = []
     api_url = "https://aus1.torproject.org/torbrowser/update_3/release/downloads.json"
     req = urllib.request.Request(api_url, headers={"User-Agent": "Mozilla/5.0"})
     try:
-        with urllib.request.urlopen(req, timeout=12) as resp:
+        with urllib.request.urlopen(req, timeout=8) as resp:
             data = json.loads(resp.read().decode("utf-8"))
             version = data.get("version")
             if version:
-                return f"https://dist.torproject.org/torbrowser/{version}/tor-expert-bundle-windows-x86_64-{version}.tar.gz"
+                urls.append(f"https://dist.torproject.org/torbrowser/{version}/tor-expert-bundle-windows-x86_64-{version}.tar.gz")
+                urls.append(f"https://archive.org/download/tor-expert-bundle-{version}/tor-expert-bundle-windows-x86_64-{version}.tar.gz")
     except Exception:
         pass
 
-    # Fallback to direct latest known release
-    return "https://dist.torproject.org/torbrowser/14.0.7/tor-expert-bundle-windows-x86_64-14.0.7.tar.gz"
+    urls.extend([
+        "https://dist.torproject.org/torbrowser/14.0.7/tor-expert-bundle-windows-x86_64-14.0.7.tar.gz",
+        "https://archive.org/download/tor-expert-bundle-14.0.7/tor-expert-bundle-windows-x86_64-14.0.7.tar.gz",
+    ])
+    return urls
 
 
 def download_and_extract_tor() -> tuple[bool, str]:
-    """Download portable Tor Expert Bundle and extract into %LOCALAPPDATA%\\opencode-unlimited\\tor."""
+    """Download portable Tor Expert Bundle with multi-mirror support and extract."""
     ensure_dirs()
     TOR_DIR.mkdir(parents=True, exist_ok=True)
     TOR_DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -106,17 +122,25 @@ def download_and_extract_tor() -> tuple[bool, str]:
     if existing_exe:
         return True, f"Tor already installed at {existing_exe}"
 
-    bundle_url = fetch_tor_bundle_url()
-    if not bundle_url:
-        return False, "Could not determine Tor Expert Bundle download URL."
-
+    bundle_urls = fetch_tor_bundle_url()
     tar_path = TOR_DIR / "tor-expert-bundle.tar.gz"
-    try:
-        req = urllib.request.Request(bundle_url, headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(req, timeout=120) as src, open(tar_path, "wb") as dst:
-            shutil.copyfileobj(src, dst)
-    except Exception as exc:
-        return False, f"Tor bundle download failed: {exc}"
+
+    downloaded = False
+    last_err = ""
+    for url in bundle_urls:
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=60) as src, open(tar_path, "wb") as dst:
+                shutil.copyfileobj(src, dst)
+            if tar_path.is_file() and tar_path.stat().st_size > 1024 * 1024:
+                downloaded = True
+                break
+        except Exception as exc:
+            last_err = str(exc)
+            continue
+
+    if not downloaded:
+        return False, f"Tor download failed across all mirrors: {last_err or 'Network timeout'}"
 
     # Extract using system tar.exe or python tarfile fallback
     extracted = False
@@ -277,10 +301,18 @@ def open_socks5_tunnel(
         sock.close()
         raise ConnectionError("SOCKS5 proxy authentication failed or invalid protocol")
 
-    # Connect command by domain name (ATYP=3)
-    host_bytes = dest_host.encode("idna")
+    # Connect command: support IPv4 (ATYP=1), IPv6 (ATYP=4), and Domain (ATYP=3)
     port_bytes = dest_port.to_bytes(2, "big")
-    req = b"\x05\x01\x00\x03" + bytes([len(host_bytes)]) + host_bytes + port_bytes
+    try:
+        ip_v4 = socket.inet_aton(dest_host)
+        req = b"\x05\x01\x00\x01" + ip_v4 + port_bytes
+    except OSError:
+        try:
+            ip_v6 = socket.inet_pton(socket.AF_INET6, dest_host)
+            req = b"\x05\x01\x00\x04" + ip_v6 + port_bytes
+        except (OSError, AttributeError):
+            host_bytes = dest_host.encode("idna")
+            req = b"\x05\x01\x00\x03" + bytes([len(host_bytes)]) + host_bytes + port_bytes
     sock.sendall(req)
 
     reply = sock.recv(4)

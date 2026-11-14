@@ -25,8 +25,13 @@ from zen_proxy import start_proxy_server
 TICK_SECONDS = 45
 
 
-def ensure_connected(warp_bin: str) -> bool:
+def ensure_connected(warp_bin: str | None = None) -> bool:
     """Verify WARP connection based on active scope (isolated proxy or full TUN)."""
+    if not warp_bin:
+        warp_bin = find_warp_cli()
+    if not warp_bin:
+        return False
+
     scope = "isolated"
     try:
         from proxy_chain import get_egress_config
@@ -37,6 +42,7 @@ def ensure_connected(warp_bin: str) -> bool:
     connected, mode, _ = warp_status(warp_bin)
     if scope == "isolated":
         run_warp(["proxy", "port", "40000"], warp_bin=warp_bin)
+        run_warp(["tunnel", "protocol", "set", "WireGuard"], warp_bin=warp_bin)
         if mode and "proxy" not in mode.lower():
             run_warp(["mode", "proxy"], warp_bin=warp_bin)
         elif not mode:
@@ -45,20 +51,20 @@ def ensure_connected(warp_bin: str) -> bool:
         if connected:
             return True
         run_warp(["connect"], warp_bin=warp_bin)
-        time.sleep(3)
+        time.sleep(2)
         connected, _, _ = warp_status(warp_bin)
         if connected:
             return True
 
-        # If still not connected, try rotating keys and clearing endpoint overrides first
-        append_log(KEEPER_LOG_FILE, "isolated tunnel not connected — rotating keys & clearing endpoint overrides")
+        # If still not connected, rotate keys, set WireGuard protocol, and clear endpoint overrides
+        append_log(KEEPER_LOG_FILE, "isolated tunnel not connected — rotating keys & setting WireGuard protocol")
         run_warp(["tunnel", "endpoint", "reset"], warp_bin=warp_bin)
-        run_warp(["tunnel", "protocol", "reset"], warp_bin=warp_bin)
+        run_warp(["tunnel", "protocol", "set", "WireGuard"], warp_bin=warp_bin)
         run_warp(["tunnel", "rotate-keys"], warp_bin=warp_bin)
         run_warp(["mode", "proxy"], warp_bin=warp_bin)
         run_warp(["proxy", "port", "40000"], warp_bin=warp_bin)
         run_warp(["connect"], warp_bin=warp_bin)
-        time.sleep(3)
+        time.sleep(2)
         connected, _, _ = warp_status(warp_bin)
         if connected:
             return True
@@ -77,14 +83,16 @@ def ensure_connected(warp_bin: str) -> bool:
             except Exception:
                 pass
 
+        run_warp(["tunnel", "protocol", "set", "WireGuard"], warp_bin=warp_bin)
         run_warp(["mode", "proxy"], warp_bin=warp_bin)
         run_warp(["proxy", "port", "40000"], warp_bin=warp_bin)
         run_warp(["connect"], warp_bin=warp_bin)
-        time.sleep(4)
+        time.sleep(3)
         connected, _, _ = warp_status(warp_bin)
         return connected
 
     # Full System TUN mode (only when scope is explicitly set to full TUN)
+    run_warp(["tunnel", "protocol", "set", "WireGuard"], warp_bin=warp_bin)
     if mode and "warp" not in mode.lower():
         run_warp(["mode", "warp"], warp_bin=warp_bin)
     elif not mode:
@@ -102,7 +110,7 @@ def ensure_connected(warp_bin: str) -> bool:
 
     append_log(KEEPER_LOG_FILE, "tunnel dead — rotating keys & registration to repair")
     run_warp(["tunnel", "endpoint", "reset"], warp_bin=warp_bin)
-    run_warp(["tunnel", "protocol", "reset"], warp_bin=warp_bin)
+    run_warp(["tunnel", "protocol", "set", "WireGuard"], warp_bin=warp_bin)
     run_warp(["tunnel", "rotate-keys"], warp_bin=warp_bin)
     run_warp(["disconnect"], warp_bin=warp_bin)
     run_warp(["registration", "delete"], warp_bin=warp_bin)

@@ -337,42 +337,76 @@ def get_warp_local_v6() -> str | None:
 
 
 def get_egress_v6(timeout: float = 8.0) -> str:
-    """Query external IPv6 egress via curl.exe or urllib."""
+    """Query external IPv6 egress via curl.exe or urllib using Cloudflare trace endpoints."""
     curl = shutil.which("curl.exe") or shutil.which("curl")
+    endpoints = (
+        "https://1.1.1.1/cdn-cgi/trace",
+        "https://cloudflare.com/cdn-cgi/trace",
+        "https://api64.ipify.org",
+    )
+
     if curl:
+        # 1. Try SOCKS5 proxy port 40000 (isolated mode)
+        for ep in endpoints:
+            try:
+                res = run_hidden(
+                    [curl, "-x", "socks5h://127.0.0.1:40000", "-s", "-m", str(int(timeout)), ep],
+                    timeout=timeout + 1.5,
+                )
+                text = res.stdout.strip()
+                if "ip=" in text:
+                    for line in text.splitlines():
+                        if line.startswith("ip="):
+                            cand = line.split("=", 1)[1].strip()
+                            if ":" in cand:
+                                ipaddress.IPv6Address(cand)
+                                return cand
+                elif ":" in text:
+                    ipaddress.IPv6Address(text)
+                    return text
+            except Exception:
+                pass
+
+        # 2. Try native IPv6 (-6) via TUN adapter
+        for ep in endpoints:
+            try:
+                res = run_hidden(
+                    [curl, "-6", "-s", "-m", str(int(timeout)), ep],
+                    timeout=timeout + 1.5,
+                )
+                text = res.stdout.strip()
+                if "ip=" in text:
+                    for line in text.splitlines():
+                        if line.startswith("ip="):
+                            cand = line.split("=", 1)[1].strip()
+                            if ":" in cand:
+                                ipaddress.IPv6Address(cand)
+                                return cand
+                elif ":" in text:
+                    ipaddress.IPv6Address(text)
+                    return text
+            except Exception:
+                pass
+
+    # 3. Direct urllib fallback
+    for ep in endpoints:
         try:
-            res = run_hidden(
-                [curl, "-x", "socks5h://127.0.0.1:40000", "-s", "-m", str(int(timeout)), "https://api64.ipify.org"],
-                timeout=timeout + 2.0,
-            )
-            ip = res.stdout.strip()
-            if ip and ":" in ip:
-                ipaddress.IPv6Address(ip)
-                return ip
+            req = urllib.request.Request(ep, headers={"User-Agent": "curl/8.0"})
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                text = resp.read().decode("utf-8", errors="replace").strip()
+                if "ip=" in text:
+                    for line in text.splitlines():
+                        if line.startswith("ip="):
+                            cand = line.split("=", 1)[1].strip()
+                            if ":" in cand:
+                                ipaddress.IPv6Address(cand)
+                                return cand
+                elif ":" in text:
+                    ipaddress.IPv6Address(text)
+                    return text
         except Exception:
             pass
-
-        try:
-            res = run_hidden(
-                [curl, "-6", "-s", "-m", str(int(timeout)), "https://api64.ipify.org"],
-                timeout=timeout + 2.0,
-            )
-            ip = res.stdout.strip()
-            if ip and ":" in ip:
-                ipaddress.IPv6Address(ip)
-                return ip
-        except Exception:
-            pass
-
-    try:
-        req = urllib.request.Request("https://api64.ipify.org", headers={"User-Agent": "curl/8.0"})
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            ip = resp.read().decode("utf-8", errors="replace").strip()
-            if ":" in ip:
-                ipaddress.IPv6Address(ip)
-                return ip
-    except Exception:
-        pass
+    return ""
     return ""
 
 

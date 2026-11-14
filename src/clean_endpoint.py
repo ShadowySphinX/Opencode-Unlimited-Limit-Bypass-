@@ -88,16 +88,16 @@ def set_custom_endpoint(endpoint: str) -> tuple[bool, str]:
 
 
 def reset_custom_endpoint() -> tuple[bool, str]:
-    """Reset Cloudflare WARP endpoint to official default."""
+    """Reset Cloudflare WARP endpoint to official default with WireGuard protocol."""
     warp_bin = find_warp_cli()
     if not warp_bin:
         return False, "Cloudflare warp-cli.exe not found."
 
     run_warp(["tunnel", "endpoint", "reset"], warp_bin=warp_bin)
-    run_warp(["tunnel", "protocol", "reset"], warp_bin=warp_bin)
+    run_warp(["tunnel", "protocol", "set", "WireGuard"], warp_bin=warp_bin)
     run_warp(["tunnel", "rotate-keys"], warp_bin=warp_bin)
     run_warp(["connect"], warp_bin=warp_bin)
-    return True, "Cloudflare WARP endpoint and protocol reset to official default."
+    return True, "Cloudflare WARP endpoint reset to official default (WireGuard protocol)."
 
 
 def auto_heal_warp_endpoint(timeout: float = 1.0) -> tuple[bool, str]:

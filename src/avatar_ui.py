@@ -860,7 +860,7 @@ class AvatarControlApi:
 
             # Phase 1: Rapid key rotation and endpoint reset (preserves active client registration)
             run_warp(["tunnel", "endpoint", "reset"], warp_bin=wb)
-            run_warp(["tunnel", "protocol", "reset"], warp_bin=wb)
+            run_warp(["tunnel", "protocol", "set", "WireGuard"], warp_bin=wb)
             run_warp(["tunnel", "rotate-keys"], warp_bin=wb)
             if scope == "isolated":
                 run_warp(["mode", "proxy"], warp_bin=wb)
@@ -881,6 +881,7 @@ class AvatarControlApi:
             run_warp(["disconnect"], warp_bin=wb)
             run_warp(["registration", "delete"], warp_bin=wb)
             run_warp(["registration", "new"], warp_bin=wb)
+            run_warp(["tunnel", "protocol", "set", "WireGuard"], warp_bin=wb)
             if scope == "isolated":
                 run_warp(["mode", "proxy"], warp_bin=wb)
                 run_warp(["proxy", "port", "40000"], warp_bin=wb)
@@ -1002,6 +1003,21 @@ class AvatarControlApi:
         desktop = find_opencode_desktop()
         if not desktop:
             return {"ok": False, "message": "OpenCode.exe Desktop app not found."}
+
+        # Clean up any orphaned/zombie opencode-cli.exe daemon processes that hold stale ports (e.g. 42914)
+        try:
+            import psutil
+            desktop_running = any("opencode.exe" in p.name().lower() for p in psutil.process_iter(["name"]))
+            if not desktop_running:
+                for p in psutil.process_iter(["name"]):
+                    if "opencode-cli" in p.name().lower():
+                        try:
+                            p.terminate()
+                        except Exception:
+                            pass
+        except Exception:
+            pass
+
         if not _port_open(SERVICE_PROXY_PORT):
             self.toggle_worker("keeper", True)
         svc_cfg = Path.home() / ".config" / "opencode" / "service.json"
@@ -1020,8 +1036,44 @@ class AvatarControlApi:
         env["HTTPS_PROXY"] = proxy_url
         env["HTTP_PROXY"] = proxy_url
         env["NO_PROXY"] = "127.0.0.1,localhost,::1"
-        subprocess.Popen([desktop, f"--proxy-server={proxy_url}"], env=env, close_fds=True)
+        subprocess.Popen(
+            [
+                desktop,
+                f"--proxy-server={proxy_url}",
+                "--proxy-bypass-list=<-loopback>;127.0.0.1;localhost;::1;*.local",
+            ],
+            env=env,
+            close_fds=True,
+        )
         return {"ok": True, "message": "Launched OpenCode Desktop through WARP IPv6 lane."}
+
+    def fix_opencode_service(self) -> dict:
+        """Terminate orphaned daemons, unblock busy service ports, and restart clean."""
+        killed = 0
+        try:
+            import psutil
+            for p in psutil.process_iter(["name"]):
+                name = p.name().lower()
+                if "opencode-cli" in name or "opencode.exe" in name:
+                    try:
+                        p.kill()
+                        killed += 1
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+        # Stop service via CLI if installed
+        cli = find_opencode_cli()
+        if cli:
+            try:
+                subprocess.run([cli, "service", "stop"], capture_output=True, timeout=5.0)
+            except Exception:
+                pass
+
+        # Reset service.json proxy env to ensure clean state
+        self.toggle_desktop_service_proxy(True)
+        return {"ok": True, "message": f"Service ports unblocked (terminated {killed} stale processes). Ready to launch!"}
 
     def launch_cli(self) -> dict:
         _deploy_scripts_and_shims()
