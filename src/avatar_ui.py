@@ -272,9 +272,21 @@ class AvatarControlApi:
         self._last_local_v6 = ""
         self._edge_pool: list[str] = []
         self._action_lock = threading.Lock()
+        self._ensure_proxy_active()
         self._refresh_egress_async(force=True)
         self._refresh_pool_async()
         self._auto_heal_warp_startup()
+
+    def _ensure_proxy_active(self) -> None:
+        """Guarantee that local HTTP/CONNECT proxy on SERVICE_PROXY_PORT (41987) is always running."""
+        if not _port_open(SERVICE_PROXY_PORT):
+            def _serve() -> None:
+                try:
+                    from zen_proxy import start_proxy_server
+                    start_proxy_server(SERVICE_PROXY_PORT)
+                except Exception:
+                    pass
+            threading.Thread(target=_serve, daemon=True).start()
 
     def _auto_heal_warp_startup(self) -> None:
         def _check_and_heal() -> None:
@@ -499,11 +511,15 @@ class AvatarControlApi:
     def set_clean_endpoint(self, endpoint: str) -> dict:
         from clean_endpoint import set_custom_endpoint
         ok, msg = set_custom_endpoint(endpoint)
+        if ok:
+            self._refresh_egress_async(force=True)
         return {"ok": ok, "message": msg}
 
     def reset_clean_endpoint(self) -> dict:
         from clean_endpoint import reset_custom_endpoint
         ok, msg = reset_custom_endpoint()
+        if ok:
+            self._refresh_egress_async(force=True)
         return {"ok": ok, "message": msg}
 
     def test_clean_endpoints(self, timeout: float = 1.2) -> dict:
@@ -841,6 +857,8 @@ class AvatarControlApi:
         try:
             from clean_endpoint import auto_heal_warp_endpoint
             ok, msg = auto_heal_warp_endpoint()
+            if ok:
+                self._refresh_egress_async(force=True)
             return {"ok": ok, "message": msg}
         except Exception as exc:
             return {"ok": False, "message": f"Auto-heal failed: {exc}"}
@@ -1015,6 +1033,14 @@ class AvatarControlApi:
                             p.terminate()
                         except Exception:
                             pass
+            # Free port 42914 if held by stale daemon to prevent "Managed service port 42914 is already in use" IPC crash
+            for conn in psutil.net_connections(kind="tcp"):
+                if conn.laddr and conn.laddr.port == 42914 and conn.pid:
+                    try:
+                        p = psutil.Process(conn.pid)
+                        p.terminate()
+                    except Exception:
+                        pass
         except Exception:
             pass
 
@@ -1056,6 +1082,19 @@ class AvatarControlApi:
                 name = p.name().lower()
                 if "opencode-cli" in name or "opencode.exe" in name:
                     try:
+                        p.kill()
+                        killed += 1
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+        try:
+            import psutil
+            for conn in psutil.net_connections(kind="tcp"):
+                if conn.laddr and conn.laddr.port == 42914 and conn.pid:
+                    try:
+                        p = psutil.Process(conn.pid)
                         p.kill()
                         killed += 1
                     except Exception:
@@ -1319,6 +1358,14 @@ def main() -> int:
 
     # Auto-kill previous versions or orphaned background tasks so only one clean instance runs
     _kill_previous_instances()
+
+    # Guarantee local proxy on 41987 is immediately active
+    if not _port_open(SERVICE_PROXY_PORT):
+        try:
+            from zen_proxy import start_proxy_server
+            start_proxy_server(SERVICE_PROXY_PORT)
+        except Exception:
+            pass
 
     existing = ctypes.windll.user32.FindWindowW(None, WINDOW_TITLE)
     if existing:

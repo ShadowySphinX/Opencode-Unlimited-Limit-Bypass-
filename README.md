@@ -63,9 +63,30 @@ Cloudflare's default IPs may be blocked, but dozens of Anycast edge nodes remain
 ### Solution 2: Tor Network (Zero-Configuration Bypass)
 If UDP and WireGuard are entirely blocked by your ISP:
 1. Click the **Tor Network** tab at the top.
-2. Click **Start Portable Tor**.
+2. Click **Start Tor Daemon**.
 3. The app automatically launches an isolated portable Tor SOCKS5 daemon (`127.0.0.1:9050`).
 4. On rate limits, a `SIGNAL NEWNYM` command is sent to port `9051`, rotating to a fresh global IPv4 exit node in under 1 second. No Cloudflare WARP required.
+
+---
+
+## Tor Network Guide
+
+If Cloudflare WARP is blocked in your region, or if you want decentralized IP rotation without Cloudflare:
+
+### 1. Built-in Portable Tor
+* Navigate to the **Tor Network** tab on the dashboard.
+* Click **Start Tor Daemon**.
+* The app runs a sandboxed Tor instance listening on `127.0.0.1:9050` with control port `9051`.
+* It requires zero external tools or manual setup.
+
+### 2. Using Existing Tor / Tor Browser
+* If you have **Tor Browser** running, the app automatically detects its standard SOCKS port (`9150`).
+* If you run a system Tor service on Linux (`systemctl start tor`), the app hooks directly into `127.0.0.1:9050`.
+
+### 3. How Limit Bypass Works on Tor
+* When OpenCode triggers a usage limit or 429 error, Zen Guard sends a `SIGNAL NEWNYM` command to Tor control port `9051`.
+* Tor immediately rebuilds its 3-hop circuit and switches to a fresh exit relay IP in under a second.
+* Auto-Resume fires right after, sending `continue` to your chat so your generation continues without human intervention.
 
 ### Solution 3: Custom Proxy Pool (Clash / V2Ray / Xray / sing-box)
 If you already run a local proxy client:
@@ -115,6 +136,15 @@ If you already run a local proxy client:
 
 ## Troubleshooting & Quick Fixes
 
+* **`Managed service port 42914 on 127.0.0.1 is already in use by another process`:**
+  * **Cause:** A previous OpenCode Desktop session crashed or left an orphaned `opencode-cli.exe` daemon holding port 42914.
+  * **Fix:** Launching OpenCode Desktop from the dashboard now scans and terminates any orphaned process holding port 42914 automatically. You can also click **Repair Service** on the dashboard.
+* **`ERR_PROXY_TUNNEL: 502 Bad Gateway` or `503 Service Unavailable`:**
+  * **Cause:** An upstream proxy or WARP connection dropped unexpectedly while handling an OpenCode request.
+  * **Fix:** The local proxy includes direct dual-stack fallback. If an upstream tunnel drops, traffic falls back cleanly instead of throwing 502/503 errors in OpenCode.
+* **Cloudflare WARP client says "Your Internet is unstable":**
+  * **Cause:** MASQUE HTTP/3 UDP packets or default WireGuard port 2408 probes are being throttled or fragmented by your ISP.
+  * **Fix:** Go to the **Clean Endpoint** tab, run a **Ping Test**, and click **Apply Endpoint** (or **Auto-Heal**). This locks WARP onto an unthrottled endpoint port (such as 500 or 4500) with stable WireGuard MTU.
 * **Cloudflare WARP shows `Connection blocked: CF_HAPPY_EYEBALLS_MITM_FAILURE`:**
   * **Cause:** Stale WARP encryption keys or protocol mismatch from custom endpoints.
   * **Fix:** The app self-heals this automatically on launch. You can also click **`Fix WARP (Reset Keys)`** on the dashboard to immediately rotate encryption keys and restore healthy status.

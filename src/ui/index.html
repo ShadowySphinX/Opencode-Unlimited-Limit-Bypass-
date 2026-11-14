@@ -1104,6 +1104,7 @@
 <script>
   let state = null;
   let activeTab = "guard";
+  let activeModeTab = null;
   let busyIds = new Set();
 
   const $ = (id) => document.getElementById(id);
@@ -1156,12 +1157,13 @@
     // Header pill
     const pillDot = $("overallDot");
     const pillTxt = $("overallText");
+    const isProxyMode = (w.mode || "").toLowerCase().includes("proxy") || (state.egress && state.egress.warp_scope === "isolated");
     if (w.rotating) {
       pillDot.className = "dot spin";
       pillTxt.textContent = "ROTATING /64...";
-    } else if (w.connected && w.adapter_v6 && (!w.egress_v6 || w.is_cf)) {
+    } else if (w.connected && (w.is_cf || (w.adapter_v6 && !w.egress_v6))) {
       pillDot.className = "dot ok";
-      pillTxt.textContent = "PROTECTED • WARP IPv6";
+      pillTxt.textContent = isProxyMode ? "PROTECTED • WARP (APP-ONLY)" : "PROTECTED • WARP IPv6";
     } else if (w.connected) {
       pillDot.className = "dot";
       pillTxt.textContent = "WARP CONNECTED (VERIFYING IPv6)";
@@ -1189,9 +1191,9 @@
     }
 
     // Card 2: Adapter IPv6
-    $("adapterV6").textContent = w.adapter_v6 || "Not active";
+    $("adapterV6").textContent = w.adapter_v6 || (isProxyMode ? "Proxy (Port 40000)" : "Not active");
     setTag($("warpModeTag"), (w.mode || "?").toUpperCase(), w.mode.toLowerCase().includes("warp") ? "ok" : "warn");
-    $("adapterSub").textContent = w.adapter_v6 ? "Socket-bound fail-closed" : "Waiting for CloudflareWARP NIC";
+    $("adapterSub").textContent = w.adapter_v6 ? "Socket-bound fail-closed" : (isProxyMode ? "App-Only Isolated Proxy (No NIC Needed)" : "Waiting for CloudflareWARP NIC");
 
     // Card 3: Pinned Edge & dropdown
     $("pinnedEdge").textContent = ln.pinned_edge || (ln.edge_override !== "auto" ? ln.edge_override : "Auto (next request)");
@@ -1248,10 +1250,13 @@
     // Multi-Egress Mode State
     const eg = s.egress || { mode: "warp" };
     const curMode = eg.mode || "warp";
+    if (!activeModeTab) {
+      activeModeTab = curMode;
+    }
 
     ["warp", "tor", "custom", "clean"].forEach((m) => {
       const tab = $("tabMode" + m.charAt(0).toUpperCase() + m.slice(1));
-      if (tab) tab.classList.toggle("active", m === curMode);
+      if (tab) tab.classList.toggle("active", m === activeModeTab);
     });
 
     const badge = $("modeActiveBadge");
@@ -1274,10 +1279,10 @@
       desc.textContent = "Cloudflare WARP with unblocked WireGuard endpoint";
     }
 
-    $("panelWarp").style.display = curMode === "warp" ? "block" : "none";
-    $("panelTor").style.display = curMode === "tor" ? "block" : "none";
-    $("panelCustom").style.display = curMode === "custom" ? "block" : "none";
-    $("panelClean").style.display = curMode === "clean" ? "block" : "none";
+    $("panelWarp").style.display = activeModeTab === "warp" ? "block" : "none";
+    $("panelTor").style.display = activeModeTab === "tor" ? "block" : "none";
+    $("panelCustom").style.display = activeModeTab === "custom" ? "block" : "none";
+    $("panelClean").style.display = activeModeTab === "clean" ? "block" : "none";
 
     // WARP Scope State
     const warpScope = eg.warp_scope || "isolated";
@@ -1434,6 +1439,7 @@
 
   // Multi-Egress Mode Handlers
   $("tabModeWarp").onclick = () => {
+    activeModeTab = "warp";
     $("panelWarp").style.display = "block";
     $("panelTor").style.display = "none";
     $("panelCustom").style.display = "none";
@@ -1445,6 +1451,7 @@
   $("btnScopeIsolated").onclick = () => runAction("btnScopeIsolated", () => window.pywebview.api.set_warp_scope("isolated"), "Applying Isolated Scope...");
   $("btnScopeTun").onclick = () => runAction("btnScopeTun", () => window.pywebview.api.set_warp_scope("tun"), "Applying TUN Scope...");
   $("tabModeTor").onclick = () => {
+    activeModeTab = "tor";
     $("panelWarp").style.display = "none";
     $("panelTor").style.display = "block";
     $("panelCustom").style.display = "none";
@@ -1454,6 +1461,7 @@
     runAction("tabModeTor", () => window.pywebview.api.set_egress_mode("tor"), "Activating Tor...");
   };
   $("tabModeCustom").onclick = () => {
+    activeModeTab = "custom";
     $("panelWarp").style.display = "none";
     $("panelTor").style.display = "none";
     $("panelCustom").style.display = "block";
@@ -1465,6 +1473,7 @@
     runAction("tabModeCustom", () => window.pywebview.api.set_egress_mode("custom", addr, ptype), "Applying Proxy...");
   };
   $("tabModeClean").onclick = () => {
+    activeModeTab = "clean";
     $("panelWarp").style.display = "none";
     $("panelTor").style.display = "none";
     $("panelCustom").style.display = "none";

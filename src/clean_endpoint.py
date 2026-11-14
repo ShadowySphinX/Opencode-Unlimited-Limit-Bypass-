@@ -7,36 +7,37 @@ import re
 import socket
 import subprocess
 import time
-from ouc_common import find_warp_cli, run_warp
+from ouc_common import find_warp_cli, run_warp, warp_status
 
 KNOWN_CLEAN_ENDPOINTS = (
-    "162.159.192.1:2408",  # Default Cloudflare Anycast (Primary)
-    "162.159.192.2:2408",  # Anycast pool node 2
-    "162.159.192.3:2408",  # Anycast pool node 3
-    "162.159.192.4:2408",  # Anycast pool node 4
-    "162.159.192.5:2408",  # Anycast pool node 5
-    "162.159.193.1:2408",  # Clean pool 1 (common RU/IR/CN bypass)
-    "162.159.193.2:2408",  # Clean pool 1 node 2
-    "162.159.193.5:2408",  # Clean pool 2
-    "162.159.193.9:2408",  # Clean pool 2 node 9
-    "162.159.193.10:2408", # Clean pool 2 node 10
-    "162.159.195.1:2408",  # Clean pool 3
-    "162.159.195.2:2408",  # Clean pool 3 node 2
-    "162.159.195.3:2408",  # Clean pool 3 node 3
-    "162.159.195.4:2408",  # Clean pool 3 node 4
-    "162.159.195.5:2408",  # Clean pool 3 node 5
-    "188.114.96.1:2408",   # Cloudflare EU alternate 1
-    "188.114.96.2:2408",   # Cloudflare EU alternate 1 node 2
-    "188.114.96.3:2408",   # Cloudflare EU alternate 1 node 3
-    "188.114.97.1:2408",   # Cloudflare EU alternate 2
-    "188.114.97.2:2408",   # Cloudflare EU alternate 2 node 2
-    "188.114.97.3:2408",   # Cloudflare EU alternate 2 node 3
-    "188.114.98.1:2408",   # Cloudflare EU alternate 3
-    "188.114.98.2:2408",   # Cloudflare EU alternate 3 node 2
-    "188.114.98.3:2408",   # Cloudflare EU alternate 3 node 3
-    "188.114.99.1:2408",   # Cloudflare EU alternate 4
-    "188.114.99.2:2408",   # Cloudflare EU alternate 4 node 2
-    "188.114.99.3:2408",   # Cloudflare EU alternate 4 node 3
+    # Standard Cloudflare WireGuard (Port 2408)
+    "162.159.192.1:2408",
+    "162.159.192.2:2408",
+    "162.159.193.1:2408",
+    "162.159.193.5:2408",
+    "162.159.195.1:2408",
+    "188.114.96.1:2408",
+    "188.114.97.1:2408",
+    "188.114.98.1:2408",
+    "188.114.99.1:2408",
+    # Alternative Port 500 (IPsec IKE — universally unblocked by ISPs)
+    "162.159.192.1:500",
+    "162.159.193.1:500",
+    "188.114.96.1:500",
+    "188.114.97.1:500",
+    # Alternative Port 4500 (IPsec NAT-T — bypasses UDP 2408 filtering)
+    "162.159.192.1:4500",
+    "162.159.193.1:4500",
+    "188.114.96.1:4500",
+    "188.114.97.1:4500",
+    # Alternative Port 1701 (L2TP / Anycast bypass)
+    "162.159.192.1:1701",
+    "162.159.193.1:1701",
+    # High-port Cloudflare WireGuard endpoints
+    "162.159.192.1:854",
+    "162.159.193.1:854",
+    "162.159.192.1:880",
+    "162.159.193.1:880",
 )
 
 
@@ -83,7 +84,13 @@ def set_custom_endpoint(endpoint: str) -> tuple[bool, str]:
     if rc == 0:
         run_warp(["tunnel", "rotate-keys"], warp_bin=warp_bin)
         run_warp(["connect"], warp_bin=warp_bin)
-        return True, f"Cloudflare WARP endpoint set to {endpoint} (WireGuard protocol)."
+        for _ in range(4):
+            time.sleep(0.8)
+            conn, _, raw = warp_status(warp_bin)
+            raw_low = raw.lower()
+            if conn and "unstable" not in raw_low and "unable" not in raw_low:
+                return True, f"Cloudflare WARP endpoint connected to {endpoint} (WireGuard)."
+        return True, f"Cloudflare WARP endpoint set to {endpoint} (handshake establishing...)."
     return False, f"Failed to set endpoint: {msg}"
 
 

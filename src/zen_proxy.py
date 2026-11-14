@@ -185,24 +185,18 @@ def _open_warp_direct(
         or clean_host.endswith(".opencode.com")
     )
 
-    # 1. Isolated (App-Only) mode: tunnel via local WARP SOCKS5 proxy (port 40000)
+    # 1. Isolated (App-Only) mode: tunnel via local WARP SOCKS5 proxy (port 40000) if listening
     if scope == "isolated":
         try:
-            from tor_manager import open_socks5_tunnel
-            return open_socks5_tunnel(clean_host, port, socks_host="127.0.0.1", socks_port=40000, timeout=6.0)
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s_chk:
+                s_chk.settimeout(0.2)
+                if s_chk.connect_ex(("127.0.0.1", 40000)) == 0:
+                    from tor_manager import open_socks5_tunnel
+                    return open_socks5_tunnel(clean_host, port, socks_host="127.0.0.1", socks_port=40000, timeout=8.0)
         except Exception:
             pass
 
-        # Auto-heal: attempt fast connection if WARP service dropped
-        try:
-            from warp_keeper import ensure_connected
-            ensure_connected()
-            from tor_manager import open_socks5_tunnel
-            return open_socks5_tunnel(clean_host, port, socks_host="127.0.0.1", socks_port=40000, timeout=6.0)
-        except Exception:
-            pass
-
-    # 2. Full System TUN mode: bind explicitly to the WARP adapter's IPv6
+    # 2. TUN mode or fallback: bind explicitly to the WARP adapter's IPv6
     if is_opencode_host:
         local_v6, pinned_edge = warp_state.get(wait_if_rotating=True)
         if local_v6:
@@ -211,10 +205,13 @@ def _open_warp_direct(
             except Exception:
                 pass
 
-        # Fallback to local WARP SOCKS5 if available
+        # Try local WARP SOCKS5 if TUN socket bind failed and port 40000 is open
         try:
-            from tor_manager import open_socks5_tunnel
-            return open_socks5_tunnel(clean_host, port, socks_host="127.0.0.1", socks_port=40000, timeout=6.0)
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s_chk:
+                s_chk.settimeout(0.2)
+                if s_chk.connect_ex(("127.0.0.1", 40000)) == 0:
+                    from tor_manager import open_socks5_tunnel
+                    return open_socks5_tunnel(clean_host, port, socks_host="127.0.0.1", socks_port=40000, timeout=8.0)
         except Exception:
             pass
 
@@ -232,7 +229,7 @@ def _open_warp_direct(
         from tor_manager import get_active_tor_target, open_socks5_tunnel
         tor_target = get_active_tor_target()
         if tor_target:
-            return open_socks5_tunnel(clean_host, port, socks_host=tor_target[0], socks_port=tor_target[1], timeout=8.0)
+            return open_socks5_tunnel(clean_host, port, socks_host=tor_target[0], socks_port=tor_target[1], timeout=6.0)
     except Exception:
         pass
 
@@ -241,13 +238,13 @@ def _open_warp_direct(
         raise ConnectionRefusedError("Cloudflare WARP tunnel unavailable (fail-closed strict mode)")
 
     # 5. Resilient Direct Fallback:
-    # If WARP is unavailable or dropped, route directly so OpenCode NEVER throws 503 errors!
+    # If WARP is unavailable or dropped, route directly so OpenCode NEVER throws 502/503 errors!
     if is_opencode_host:
         try:
             _, pinned_edge = warp_state.get(wait_if_rotating=False)
             if pinned_edge and ":" in pinned_edge:
                 sock = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
-                sock.settimeout(4.0)
+                sock.settimeout(3.0)
                 sock.connect((pinned_edge, port))
                 sock.settimeout(None)
                 return sock
@@ -255,7 +252,7 @@ def _open_warp_direct(
             pass
 
     # Direct standard dual-stack connection (IPv4/IPv6)
-    sock = socket.create_connection((clean_host, port), timeout=10.0)
+    sock = socket.create_connection((clean_host, port), timeout=8.0)
     sock.settimeout(None)
     return sock
 
@@ -337,8 +334,17 @@ def _make_handler(warp_state: _WarpState):
                 try:
                     upstream = _open_upstream(host, port, warp_state)
                 except Exception as exc:
-                    self._send_err(503, f"Service Unavailable: {exc}")
-                    return
+                    is_strict = os.environ.get("OUC_STRICT_PROXY") == "1" or (LANE_DIR / "strict_proxy.flag").is_file()
+                    if is_strict:
+                        self._send_err(503, f"Service Unavailable: {exc}")
+                        return
+                    # Seamless direct fallback so user never gets 502/503 errors
+                    try:
+                        upstream = socket.create_connection((host, port), timeout=8.0)
+                        upstream.settimeout(None)
+                    except Exception as exc2:
+                        self._send_err(503, f"Service Unavailable: {exc2}")
+                        return
 
                 try:
                     self.wfile.write(f"{proto} 200 Connection Established\r\n\r\n".encode("ascii"))
@@ -361,8 +367,17 @@ def _make_handler(warp_state: _WarpState):
             try:
                 upstream = _open_upstream(host, port, warp_state)
             except Exception as exc:
-                self._send_err(503, f"Service Unavailable: {exc}")
-                return
+                is_strict = os.environ.get("OUC_STRICT_PROXY") == "1" or (LANE_DIR / "strict_proxy.flag").is_file()
+                if is_strict:
+                    self._send_err(503, f"Service Unavailable: {exc}")
+                    return
+                # Seamless direct fallback so user never gets 502/503 errors
+                try:
+                    upstream = socket.create_connection((host, port), timeout=8.0)
+                    upstream.settimeout(None)
+                except Exception as exc2:
+                    self._send_err(503, f"Service Unavailable: {exc2}")
+                    return
 
             try:
                 req_head = f"{method} {path} {proto}\r\n".encode("latin-1")

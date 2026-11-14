@@ -265,11 +265,32 @@ ok "opencode entry → lane (fresh edge + /64 per launch)"
 
 # ---------------------------------------------------------------- verify end to end (the installer doesn't lie)
 say "verifying the lane end to end (this hits opencode once)…"
-V6=$(timeout 12 curl -s -m 10 https://api64.ipify.org 2>/dev/null)
-case "$V6" in
-  2606:*) ok "egress is cloudflare warp: $(echo "$V6" | cut -d: -f1-4)::/64" ;;
-  *) bad "egress is not warp yet — keeper is still setting up, give it a minute then run ${BRAND}-doctor" ;;
-esac
+if [ "$IS_VPS" = "1" ]; then
+  CF_TRACE=$(timeout 12 curl -x socks5h://127.0.0.1:40000 -s -m 10 https://cloudflare.com/cdn-cgi/trace 2>/dev/null || timeout 12 curl -x http://127.0.0.1:41987 -s -m 10 https://cloudflare.com/cdn-cgi/trace 2>/dev/null || true)
+else
+  CF_TRACE=$(timeout 12 curl -s -m 10 https://cloudflare.com/cdn-cgi/trace 2>/dev/null || true)
+fi
+V6=$(echo "$CF_TRACE" | grep "^ip=" | cut -d= -f2)
+WARP_STATUS=$(echo "$CF_TRACE" | grep "^warp=" | cut -d= -f2)
+if [ -z "$V6" ]; then
+  if [ "$IS_VPS" = "1" ]; then
+    V6=$(timeout 12 curl -x socks5h://127.0.0.1:40000 -s -m 10 https://api64.ipify.org 2>/dev/null || true)
+  else
+    V6=$(timeout 12 curl -s -m 10 https://api64.ipify.org 2>/dev/null || true)
+  fi
+fi
+
+if [ "$WARP_STATUS" = "on" ] || [ "$WARP_STATUS" = "plus" ]; then
+  ok "egress is cloudflare (warp verified): $V6"
+elif [ -n "$V6" ]; then
+  FIRST=$(echo "$V6" | cut -d: -f1-4)
+  case "$V6" in
+    2606:*|2a09:*|104.28.*|8.29.*) ok "egress is cloudflare (warp): $V6" ;;
+    *) bad "egress is not warp yet — keeper is still setting up, give it a minute then run ${BRAND}-doctor" ;;
+  esac
+else
+  bad "egress is not warp yet — keeper is still setting up, give it a minute then run ${BRAND}-doctor"
+fi
 
 case ":$PATH:" in
   *":$HOME/.local/bin:"*) ok "PATH has ~/.local/bin" ;;

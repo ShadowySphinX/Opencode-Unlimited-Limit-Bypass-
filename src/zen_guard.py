@@ -118,6 +118,16 @@ def _read_new_log_bytes(state: dict) -> bool:
                 "rate_limit_exceeded",
                 "429 too many requests",
                 "free-tier usage limit",
+                "too many requests",
+                "exceeded your current quota",
+                "usage limit reached",
+                "credits exhausted",
+                "status=429",
+                "status: 429",
+                "status 429",
+                "code=429",
+                "resource_exhausted",
+                "ratelimit",
             )
             if any(p in chunk_lower for p in wall_patterns):
                 wall = True
