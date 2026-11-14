@@ -48,9 +48,23 @@ printf '%s opencode.ai\n%s www.opencode.ai\n%s api.opencode.ai\n' "$AAAA" "$AAAA
 # random machine-id (some endpoints sniff it; fresh per launch costs nothing)
 tr -dc 'a-f0-9' < /dev/urandom | head -c 32 > "$TD/machine-id"
 
-# ---- launch the real binary inside the namespace
-exec unshare -rm bash -c '
-  mount --bind "$1/hosts"      /etc/hosts
-  mount --bind "$1/machine-id" /etc/machine-id
-  exec "$2" "${@:3}"
-' _ "$TD" "$REAL" "$@"
+# ---- launch the real binary (with graceful fallback if unshare is restricted by VPS kernel)
+CAN_UNSHARE=0
+if unshare -rm true 2>/dev/null; then
+  CAN_UNSHARE=1
+fi
+
+if [ "$CAN_UNSHARE" = "1" ]; then
+  exec unshare -rm bash -c '
+    mount --bind "$1/hosts"      /etc/hosts
+    mount --bind "$1/machine-id" /etc/machine-id
+    exec "$2" "${@:3}"
+  ' _ "$TD" "$REAL" "$@"
+else
+  # Container / VPS fallback: unshare is blocked by kernel security policy (/proc/self/uid_map restricted).
+  # Route via proxy lane directly without needing unprivileged mount namespaces!
+  export HTTPS_PROXY="${HTTPS_PROXY:-http://127.0.0.1:41987}"
+  export HTTP_PROXY="${HTTP_PROXY:-http://127.0.0.1:41987}"
+  export NO_PROXY="127.0.0.1,localhost,::1"
+  exec "$REAL" "$@"
+fi

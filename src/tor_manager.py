@@ -106,8 +106,10 @@ def fetch_tor_bundle_url() -> list[str]:
         pass
 
     urls.extend([
-        "https://dist.torproject.org/torbrowser/14.0.7/tor-expert-bundle-windows-x86_64-14.0.7.tar.gz",
         "https://archive.org/download/tor-expert-bundle-14.0.7/tor-expert-bundle-windows-x86_64-14.0.7.tar.gz",
+        "https://tor.calyxinstitute.org/dist/torbrowser/14.0.7/tor-expert-bundle-windows-x86_64-14.0.7.tar.gz",
+        "https://tor.eff.org/dist/torbrowser/14.0.7/tor-expert-bundle-windows-x86_64-14.0.7.tar.gz",
+        "https://dist.torproject.org/torbrowser/14.0.7/tor-expert-bundle-windows-x86_64-14.0.7.tar.gz",
     ])
     return urls
 

@@ -194,6 +194,8 @@ sw registration new >/dev/null 2>&1   # already-registered boxes just error, fin
 IS_VPS=0
 if [ -n "${SSH_CLIENT:-}" ] || [ -n "${SSH_TTY:-}" ] || [ -n "${SSH_CONNECTION:-}" ] || [ -f /etc/cloud/cloud.cfg ] || [ -d /var/lib/cloud ]; then
   IS_VPS=1
+  touch "$DEST/vps.flag" 2>/dev/null || true
+  sudo touch /etc/opencode-unlimited-vps.flag 2>/dev/null || true
   say "VPS / SSH environment detected: enforcing isolated proxy mode (port 40000) to protect SSH access"
 fi
 

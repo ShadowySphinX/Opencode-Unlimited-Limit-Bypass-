@@ -44,23 +44,39 @@ def _should_add_standalone(args: list[str]) -> bool:
     return _needs_tunnel(args)
 
 
-def _ensure_warp_up() -> str | None:
+def _ensure_tunnel_up() -> bool:
+    """Ensure upstream network lane (WARP, Tor, or Custom Proxy) is accessible."""
+    try:
+        from proxy_chain import get_egress_config
+        cfg = get_egress_config()
+        mode = cfg.get("mode", "warp")
+        if mode in ("tor", "custom"):
+            return True
+        scope = cfg.get("warp_scope", "isolated")
+        if scope == "isolated":
+            import socket
+            try:
+                with socket.create_connection(("127.0.0.1", 40000), timeout=0.5):
+                    return True
+            except OSError:
+                pass
+    except Exception:
+        pass
+
     v6 = get_warp_local_v6()
     if v6:
-        return v6
+        return True
 
     warp = find_warp_cli()
     if not warp:
-        return None
+        return True  # zen-proxy provides seamless dual-stack fallback
 
-    run_warp(["mode", "warp"], warp_bin=warp)
-    run_warp(["connect"], warp_bin=warp)
-    for _ in range(10):
-        time.sleep(1.0)
-        v6 = get_warp_local_v6()
-        if v6:
-            return v6
-    return None
+    from ouc_common import LANE_DIR
+    is_strict = os.environ.get("OUC_STRICT_PROXY") == "1" or (LANE_DIR / "strict_proxy.flag").is_file()
+    if not is_strict:
+        return True  # zen-proxy auto-routes with resilient direct fallback
+
+    return False
 
 
 def main() -> int:
@@ -91,10 +107,10 @@ def main() -> int:
             cmd = [os.environ.get("COMSPEC", "cmd.exe"), "/c", *cmd]
         return subprocess.run(cmd).returncode
 
-    if not _ensure_warp_up():
+    if not _ensure_tunnel_up():
         print(
-            "[zen-lane] Cloudflare WARP IPv6 tunnel is not up (fail-closed: blocking direct egress).\n"
-            "Run: opencode-unlimited-doctor  or  opencode-unlimited-hop",
+            "[zen-lane] Network tunnel is not accessible (fail-closed strict mode is active).\n"
+            "Disable Strict Mode or run: opencode-unlimited-doctor",
             file=sys.stderr,
         )
         return 1

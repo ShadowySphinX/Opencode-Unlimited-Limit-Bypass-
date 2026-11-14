@@ -38,9 +38,13 @@ echo "$ST" | grep -q Connected \
 
 # ---- kill-switch chains & egress check
 IS_PROXY=0
-if wo settings 2>/dev/null | grep -qi "proxy"; then
+if [ -f /etc/opencode-unlimited-vps.flag ] || [ -f "$DEST/vps.flag" ]; then
   IS_PROXY=1
-elif ss -tln 2>/dev/null | grep -q ":40000 "; then
+elif wo settings 2>/dev/null | grep -qi "proxy"; then
+  IS_PROXY=1
+elif wo mode 2>/dev/null | grep -qi "proxy"; then
+  IS_PROXY=1
+elif ss -tln 2>/dev/null | grep -q ":40000"; then
   IS_PROXY=1
 elif [ -n "${SSH_CLIENT:-}" ] || [ -n "${SSH_TTY:-}" ] || [ -n "${SSH_CONNECTION:-}" ] || [ -f /etc/cloud/cloud.cfg ] || [ -d /var/lib/cloud ]; then
   IS_PROXY=1

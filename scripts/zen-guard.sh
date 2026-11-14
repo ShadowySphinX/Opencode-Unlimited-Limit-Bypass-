@@ -179,6 +179,18 @@ while true; do
       H=$(state_get hops); H=${H:-0}; H=$((H + 1))
       state_set hops "$H"
       glog "rotated #$H: $OLD → $NEW ✓"
+      python3 -c "
+import sqlite3, os
+from pathlib import Path
+for db in [Path.home() / '.config' / 'ai.opencode.desktop' / 'drafts.sqlite', Path.home() / '.local' / 'share' / 'opencode' / 'drafts.sqlite']:
+    if db.is_file():
+        try:
+            c = sqlite3.connect(str(db))
+            c.execute(\"DELETE FROM state WHERE key IN ('free-limit', 'go-upsell')\")
+            c.execute(\"DELETE FROM state WHERE key LIKE '%free%limit%'\")
+            c.commit(); c.close()
+        except: pass
+" 2>/dev/null || true
       sleep 2
       if command -v opencode >/dev/null 2>&1; then
         nohup opencode run --continue "continue" >/dev/null 2>&1 &

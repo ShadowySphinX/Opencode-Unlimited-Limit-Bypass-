@@ -25,7 +25,7 @@ TICK=45
 
 # Detect SSH session or cloud VPS environment
 IS_VPS=0
-if [ -n "${SSH_CLIENT:-}" ] || [ -n "${SSH_TTY:-}" ] || [ -n "${SSH_CONNECTION:-}" ] || [ -f /etc/cloud/cloud.cfg ] || [ -d /var/lib/cloud ]; then
+if [ -f /etc/opencode-unlimited-vps.flag ] || [ -n "${SSH_CLIENT:-}" ] || [ -n "${SSH_TTY:-}" ] || [ -n "${SSH_CONNECTION:-}" ] || [ -f /etc/cloud/cloud.cfg ] || [ -d /var/lib/cloud ]; then
   IS_VPS=1
 fi
 

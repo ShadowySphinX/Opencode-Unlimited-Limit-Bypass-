@@ -94,7 +94,11 @@ $ArgsList = @(
     "--hidden-import", "warp_keeper",
     "--hidden-import", "zen_guard",
     "--hidden-import", "zen_hop",
-    "--hidden-import", "doctor"
+    "--hidden-import", "doctor",
+    "--hidden-import", "tor_manager",
+    "--hidden-import", "proxy_chain",
+    "--hidden-import", "clean_endpoint",
+    "--hidden-import", "auto_resume"
 )
 
 if (Test-Path $WvHooks) {

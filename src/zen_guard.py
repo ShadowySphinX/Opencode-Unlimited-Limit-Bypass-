@@ -62,7 +62,22 @@ def _save_state(state: dict) -> None:
 def _dispatch_auto_resume() -> None:
     """Dispatches 'continue' to the active OpenCode session once the limit is bypassed."""
     try:
-        from auto_resume import resume_active_session, is_auto_resume_enabled
+        try:
+            from auto_resume import resume_active_session, is_auto_resume_enabled, clear_opencode_free_limit
+        except ImportError:
+            import sys
+            from pathlib import Path
+            src_dir = Path(__file__).resolve().parent
+            if str(src_dir) not in sys.path:
+                sys.path.insert(0, str(src_dir))
+            scripts_dir = Path(os.environ.get("LOCALAPPDATA", "")) / "opencode-unlimited" / "scripts"
+            if str(scripts_dir) not in sys.path:
+                sys.path.insert(0, str(scripts_dir))
+            from auto_resume import resume_active_session, is_auto_resume_enabled, clear_opencode_free_limit
+
+        # Always clear client-side free-limit locks immediately upon rotation
+        clear_opencode_free_limit()
+
         if is_auto_resume_enabled():
             time.sleep(1.5)
             ok, res_msg = resume_active_session()

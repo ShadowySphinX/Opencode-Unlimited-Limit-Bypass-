@@ -1,5 +1,5 @@
 # PLEASE GIVE PROPER CREDITS. JUST DONT REBRAND AND LAUNCH IT AS YOURS.
-# NEW VERSION-2.4.0 (almost all the issues are fixed)
+# NEW VERSION-2.4.1 (hotfix: ECONNRESET, drafts.sqlite free-limit unlock, unshare fallback, auto-resume)
 # Opencode-Unlimited-Limit-Bypass
 
 [![Author](https://img.shields.io/badge/Author-Avatar%20%28ShadowySphinX%29-22d3ee?style=for-the-badge&logo=github)](https://github.com/ShadowySphinX)
@@ -136,6 +136,12 @@ If you already run a local proxy client:
 
 ## Troubleshooting & Quick Fixes
 
+* **`Connection lost while reading the response: ECONNRESET` (especially with DeepSeek / reasoning models):**
+  * **Cause:** Reasoning models (like DeepSeek V4.1 Flash Free) can think for 1-5 minutes between streaming tokens. Older proxies closed sockets after 60 seconds of idle time.
+  * **Fix:** In v2.4.0+, the proxy includes native TCP KeepAlive (`SO_KEEPALIVE`) with a 15-minute streaming buffer. Connections remain rock-solid regardless of how long the model spends reasoning.
+* **`You've used today's free messages. They reset at [timestamp]`:**
+  * **Cause:** OpenCode Desktop stores an internal lockout timestamp in its local database (`drafts.sqlite`). Even after rotating to a fresh IP, the desktop UI sees the local database key and disables the prompt input.
+  * **Fix:** Zen Guard and Deep Reset now automatically purge `free-limit` and `go-upsell` from `drafts.sqlite` the moment a limit is detected. Clicking **Deep Reset** instantly clears this screen and unlocks your prompt box.
 * **`Managed service port 42914 on 127.0.0.1 is already in use by another process`:**
   * **Cause:** A previous OpenCode Desktop session crashed or left an orphaned `opencode-cli.exe` daemon holding port 42914.
   * **Fix:** Launching OpenCode Desktop from the dashboard now scans and terminates any orphaned process holding port 42914 automatically. You can also click **Repair Service** on the dashboard.

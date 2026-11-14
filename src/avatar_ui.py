@@ -76,6 +76,7 @@ _WORKER_FILES = (
     "tor_manager.py",
     "proxy_chain.py",
     "clean_endpoint.py",
+    "auto_resume.py",
 )
 _SERVICE_ENV_KEYS = (
     "HTTPS_PROXY",
@@ -113,6 +114,62 @@ def _is_mutex_held(name: str) -> bool:
         kernel32.CloseHandle(ctypes.c_void_p(handle))
         return True
     return False
+
+
+def free_service_port(port: int = 42914) -> int:
+    """Kill any process holding the OpenCode managed service port to prevent IPC EADDRINUSE errors."""
+    killed = 0
+    try:
+        import psutil
+        for conn in psutil.net_connections(kind="tcp"):
+            if conn.laddr and conn.laddr.port == port and conn.pid:
+                try:
+                    p = psutil.Process(conn.pid)
+                    p.kill()
+                    killed += 1
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+    if sys.platform == "win32":
+        try:
+            out = subprocess.check_output(f'netstat -ano | findstr ":{port} "', shell=True, text=True, errors="ignore")
+            for line in out.splitlines():
+                parts = line.strip().split()
+                if len(parts) >= 5 and "LISTENING" in parts:
+                    pid = parts[-1]
+                    if pid.isdigit() and int(pid) != os.getpid():
+                        subprocess.run(["taskkill", "/F", "/PID", pid], capture_output=True)
+                        killed += 1
+        except Exception:
+            pass
+    return killed
+
+
+def clear_opencode_free_limit() -> int:
+    """Delete client-side free-limit and go-upsell lockout rows from drafts.sqlite."""
+    candidates = [
+        Path(os.environ.get("APPDATA", Path.home() / "AppData" / "Roaming")) / "ai.opencode.desktop" / "drafts.sqlite",
+        Path.home() / ".config" / "ai.opencode.desktop" / "drafts.sqlite",
+    ]
+    deleted = 0
+    import sqlite3
+    for db_path in candidates:
+        if not db_path.is_file():
+            continue
+        try:
+            conn = sqlite3.connect(str(db_path), timeout=3.0)
+            cur = conn.cursor()
+            cur.execute("DELETE FROM state WHERE key IN ('free-limit', 'go-upsell')")
+            deleted += cur.rowcount
+            cur.execute("DELETE FROM state WHERE key LIKE '%free%limit%'")
+            deleted += cur.rowcount
+            conn.commit()
+            conn.close()
+        except Exception:
+            pass
+    return deleted
 
 
 def _task_exists(task_name: str) -> bool:
@@ -653,6 +710,8 @@ class AvatarControlApi:
                         killed += 1
                 except Exception:
                     pass
+            if not enable and name == "keeper":
+                self.toggle_desktop_service_proxy(False)
             return {"ok": True, "message": f"Stopped {name} ({killed} process{'es' if killed != 1 else ''})."}
 
         _deploy_scripts_and_shims()
@@ -690,11 +749,14 @@ class AvatarControlApi:
         # 1. If enabling, ensure keeper is running to host port 41987
         if enable:
             if not _port_open(SERVICE_PROXY_PORT):
+                self._ensure_proxy_active()
                 self.toggle_worker("keeper", True)
                 for _ in range(12):
                     if _port_open(SERVICE_PROXY_PORT):
                         break
                     time.sleep(0.3)
+            if not _port_open(SERVICE_PROXY_PORT):
+                return {"ok": False, "message": f"Proxy port {SERVICE_PROXY_PORT} is not listening. Check WARP Keeper."}
 
         # 2. Update service.json directly in Python (100% reliable, zero CLI dependencies)
         try:
@@ -977,6 +1039,14 @@ class AvatarControlApi:
                 except Exception:
                     pass
 
+        # Clear client-side rate limit lockouts from drafts.sqlite
+        fl_cleared = clear_opencode_free_limit()
+        if fl_cleared > 0:
+            cleared.append(f"{fl_cleared} limit entries")
+
+        # Unblock port 42914
+        free_service_port(42914)
+
         # Clear guard blacklist and reset edge override
         self.clear_blacklist()
         self.set_edge_override("auto")
@@ -1022,27 +1092,11 @@ class AvatarControlApi:
         if not desktop:
             return {"ok": False, "message": "OpenCode.exe Desktop app not found."}
 
-        # Clean up any orphaned/zombie opencode-cli.exe daemon processes that hold stale ports (e.g. 42914)
-        try:
-            import psutil
-            desktop_running = any("opencode.exe" in p.name().lower() for p in psutil.process_iter(["name"]))
-            if not desktop_running:
-                for p in psutil.process_iter(["name"]):
-                    if "opencode-cli" in p.name().lower():
-                        try:
-                            p.terminate()
-                        except Exception:
-                            pass
-            # Free port 42914 if held by stale daemon to prevent "Managed service port 42914 is already in use" IPC crash
-            for conn in psutil.net_connections(kind="tcp"):
-                if conn.laddr and conn.laddr.port == 42914 and conn.pid:
-                    try:
-                        p = psutil.Process(conn.pid)
-                        p.terminate()
-                    except Exception:
-                        pass
-        except Exception:
-            pass
+        # Clear any client-side rate limit lockouts
+        clear_opencode_free_limit()
+
+        # Free port 42914 to ensure OpenCode managed service starts without IPC collision
+        free_service_port(42914)
 
         if not _port_open(SERVICE_PROXY_PORT):
             self.toggle_worker("keeper", True)
@@ -1066,7 +1120,7 @@ class AvatarControlApi:
             [
                 desktop,
                 f"--proxy-server={proxy_url}",
-                "--proxy-bypass-list=<-loopback>;127.0.0.1;localhost;::1;*.local",
+                "--proxy-bypass-list=127.0.0.1;localhost;::1;*.local",
             ],
             env=env,
             close_fds=True,
@@ -1089,18 +1143,11 @@ class AvatarControlApi:
         except Exception:
             pass
 
-        try:
-            import psutil
-            for conn in psutil.net_connections(kind="tcp"):
-                if conn.laddr and conn.laddr.port == 42914 and conn.pid:
-                    try:
-                        p = psutil.Process(conn.pid)
-                        p.kill()
-                        killed += 1
-                    except Exception:
-                        pass
-        except Exception:
-            pass
+        # Aggressively unblock managed service port 42914
+        killed += free_service_port(42914)
+
+        # Clear client-side rate limit lockouts
+        fl_cleared = clear_opencode_free_limit()
 
         # Stop service via CLI if installed
         cli = find_opencode_cli()
@@ -1110,9 +1157,13 @@ class AvatarControlApi:
             except Exception:
                 pass
 
-        # Reset service.json proxy env to ensure clean state
-        self.toggle_desktop_service_proxy(True)
-        return {"ok": True, "message": f"Service ports unblocked (terminated {killed} stale processes). Ready to launch!"}
+        # Reset service.json proxy env: wire to proxy only if port 41987 is alive, otherwise restore direct
+        if _port_open(SERVICE_PROXY_PORT):
+            self.toggle_desktop_service_proxy(True)
+        else:
+            self.toggle_desktop_service_proxy(False)
+        extra = f" + cleared {fl_cleared} limit rows" if fl_cleared > 0 else ""
+        return {"ok": True, "message": f"Service ports unblocked (terminated {killed} stale processes{extra}). Ready to launch!"}
 
     def launch_cli(self) -> dict:
         _deploy_scripts_and_shims()

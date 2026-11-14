@@ -115,16 +115,31 @@ class _ThreadedTCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
 
 
 def _relay(a: socket.socket, b: socket.socket) -> None:
-    """Bidirectionally forward bytes between two sockets with graceful half-close handling."""
+    """Bidirectionally forward bytes between two sockets with TCP keepalive and resilient streaming."""
     sockets = [a, b]
     closed = set()
+    for s in (a, b):
+        try:
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+            # Windows TCP keepalive parameters: idle 15s, interval 5s
+            if hasattr(socket, "SIO_KEEPALIVE_VALS"):
+                s.ioctl(socket.SIO_KEEPALIVE_VALS, (1, 15000, 5000))
+        except Exception:
+            pass
+
+    last_active = time.monotonic()
     try:
         while sockets:
-            readable, _, exceptional = select.select(sockets, [], sockets, 60.0)
+            readable, _, exceptional = select.select(sockets, [], sockets, 5.0)
             if exceptional:
                 break
             if not readable:
-                break
+                # Generous 15-minute idle ceiling for long-thinking models (DeepSeek V4.1 reasoning)
+                if time.monotonic() - last_active > 900.0:
+                    break
+                continue
+
+            last_active = time.monotonic()
             for src in readable:
                 dst = b if src is a else a
                 try:
