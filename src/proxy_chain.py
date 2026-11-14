@@ -52,6 +52,10 @@ def set_egress_config(
         "custom_type": custom_type.lower().strip(),
     }
     EGRESS_CONFIG_FILE.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
+    try:
+        (LANE_DIR / "custom_proxy_index.txt").write_text("0", encoding="utf-8")
+    except Exception:
+        pass
     return cfg
 
 

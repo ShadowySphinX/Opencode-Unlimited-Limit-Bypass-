@@ -110,6 +110,8 @@ def _read_new_log_bytes(state: dict) -> bool:
             chunk_lower = chunk.lower()
             wall_patterns = (
                 "quotaexceeded",
+                "quota exceeded",
+                "quota_exceeded",
                 "free usage limit",
                 "free usage exceeded",
                 "rate limit exceeded",

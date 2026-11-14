@@ -128,7 +128,7 @@ while true; do
   NEWBYTES=$((SIZE - OFF))
   WALL=0
   if [ "$NEWBYTES" -gt 0 ] && [ "$NEWBYTES" -lt 50000000 ]; then
-    if tail -c +"$((OFF + 1))" "$LOGF" 2>/dev/null | grep -E -aqi "QuotaExceeded|Free usage limit|Free usage exceeded|Rate limit exceeded|rate_limit_exceeded|free-tier usage limit"; then
+    if tail -c +"$((OFF + 1))" "$LOGF" 2>/dev/null | grep -E -aqi "QuotaExceeded|Quota Exceeded|quota_exceeded|Free usage limit|Free usage exceeded|Rate limit exceeded|rate_limit_exceeded|429 too many requests|free-tier usage limit"; then
       WALL=1
     fi
   fi
