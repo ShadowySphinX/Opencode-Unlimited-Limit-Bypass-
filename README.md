@@ -120,7 +120,7 @@ If you already run a local proxy client:
   * **Fix:** The app self-heals this automatically on launch. You can also click **`Fix WARP (Reset Keys)`** on the dashboard to immediately rotate encryption keys and restore healthy status.
 * **`ECONNREFUSED: Unable to connect. Is the computer able to access the url?`**
   * **Cause:** OpenCode is configured to route through the local proxy (`127.0.0.1:41987`), but `OpencodeUnlimited-Multi.exe` is closed.
-  * **Fix:** Keep `OpencodeUnlimited-Multi.exe` running in the background while using OpenCode. To disconnect OpenCode from the proxy, toggle off **Desktop App Proxy** in the app.
+  * **Fix:** Keep `OpencodeUnlimited-Multi.exe` running in the background while using OpenCode.
 * **`opencode-cli.exe not found`:**
   * **Cause:** OpenCode CLI is located in a custom or versioned directory.
   * **Fix:** Click **Install / Repair System** at the bottom left of the dashboard. The app automatically scans your system, locates the binary, and wires the paths.
