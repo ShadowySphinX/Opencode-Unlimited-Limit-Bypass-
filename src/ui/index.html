@@ -823,6 +823,11 @@
               data-tip-body="Toggles the Cloudflare WARP TUN tunnel directly. Note: while disconnected, OpenCode requests fail closed (503) instead of exposing your home ISP IP.">
         Connect WARP
       </button>
+      <button id="btnDeepReset" class="btn" style="border-color:var(--amber);color:var(--amber);"
+              data-tip-title="Deep Reset Identity (Fresh Start)"
+              data-tip-body="Safely archives session cache, wipes rate-limit lock files, and immediately rotates your IP. Resolves stubborn quota limits when standard hops don't clear them.">
+        ⚡ Deep Reset
+      </button>
     </section>
 
     <!-- Live Telemetry Cards -->
@@ -1480,6 +1485,11 @@
   $("btnWarpToggle").onclick = () => {
     const conn = state && state.warp && state.warp.connected;
     runAction("btnWarpToggle", () => conn ? window.pywebview.api.warp_disconnect() : window.pywebview.api.warp_connect(), conn ? "Disconnecting..." : "Connecting...");
+  };
+  $("btnDeepReset").onclick = () => {
+    if (confirm("Deep Reset archives session cache and immediately rotates your identity. Proceed?")) {
+      runAction("btnDeepReset", () => window.pywebview.api.deep_reset_identity(), "Resetting Identity...");
+    }
   };
   $("btnRerollEdge").onclick = () => runAction("btnRerollEdge", () => window.pywebview.api.reroll_edge(), "...");
   $("edgeSelect").onchange = (e) => runAction("edgeSelect", () => window.pywebview.api.set_edge_override(e.target.value));

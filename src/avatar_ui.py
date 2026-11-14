@@ -790,6 +790,76 @@ class AvatarControlApi:
         self._edge_pool = pool
         return {"ok": True, "pool": pool, "message": f"Found {len(pool)} live opencode.ai IPv6 edges."}
 
+    def deep_reset_identity(self) -> dict:
+        """Deep clean session cache & rotate identity to wipe persistent quota limits."""
+        import shutil, datetime, tempfile
+        # Terminate any running OpenCode processes so database files are not locked
+        try:
+            subprocess.run(["taskkill", "/F", "/IM", "opencode.exe", "/IM", "opencode-cli.exe"], capture_output=True)
+        except Exception:
+            pass
+
+        base_dir = Path.home() / ".local" / "share" / "opencode"
+        stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        arch_dir = base_dir / "archive" / stamp
+        cleared: list[str] = []
+
+        if base_dir.is_dir():
+            arch_dir.mkdir(parents=True, exist_ok=True)
+            for item_name in ("auth.json", "opencode.db", "opencode.db-wal", "opencode.db-shm", "storage", "olliecode-fingerprint.json"):
+                target = base_dir / item_name
+                if target.is_file():
+                    try:
+                        shutil.copy2(target, arch_dir / item_name)
+                        target.unlink(missing_ok=True)
+                        cleared.append(item_name)
+                    except Exception:
+                        pass
+                elif target.is_dir():
+                    try:
+                        shutil.copytree(target, arch_dir / item_name, dirs_exist_ok=True)
+                        shutil.rmtree(target, ignore_errors=True)
+                        cleared.append(item_name)
+                    except Exception:
+                        pass
+
+        for extra_cache in [
+            Path.home() / ".cache" / "opencode",
+            Path.home() / ".local" / "state" / "opencode",
+            Path(os.environ.get("LOCALAPPDATA", "")) / "opencode" / "cache" if os.environ.get("LOCALAPPDATA") else None,
+            Path(tempfile.gettempdir()) / "opencode",
+        ]:
+            if extra_cache and extra_cache.is_dir():
+                try:
+                    shutil.rmtree(extra_cache, ignore_errors=True)
+                    cleared.append(extra_cache.name)
+                except Exception:
+                    pass
+
+        rot_msg = ""
+        try:
+            from proxy_chain import get_egress_config
+            mode = get_egress_config().get("mode", "warp")
+            if mode == "tor":
+                from tor_manager import rotate_tor_circuit
+                _, rot_msg = rotate_tor_circuit()
+            elif mode == "custom":
+                from proxy_chain import rotate_custom_proxy
+                _, rot_msg = rotate_custom_proxy()
+            else:
+                from ouc_common import find_warp_cli, hop_once
+                wbin = find_warp_cli()
+                if wbin:
+                    new_ip = hop_once(wbin)
+                    rot_msg = f"Rotated WARP IP: {new_ip}" if new_ip else "WARP reconnected"
+        except Exception as exc:
+            rot_msg = f"Rotation note: {exc}"
+
+        return {
+            "ok": True,
+            "message": f"Deep reset complete. Archived & cleared: {', '.join(cleared) or 'state clean'}. {rot_msg}",
+        }
+
     def clear_blacklist(self) -> dict:
         if not GUARD_STATE_FILE.is_file():
             return {"ok": True, "message": "Blacklist already empty."}

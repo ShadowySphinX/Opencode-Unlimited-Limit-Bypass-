@@ -95,7 +95,17 @@ def _read_new_log_bytes(state: dict) -> bool:
             with OPENCODE_LOG_FILE.open("rb") as fh:
                 fh.seek(offset)
                 chunk = fh.read(delta).decode("utf-8", errors="replace")
-            if "QuotaExceeded" in chunk or "Free usage limit reached" in chunk:
+            chunk_lower = chunk.lower()
+            wall_patterns = (
+                "quotaexceeded",
+                "free usage limit",
+                "free usage exceeded",
+                "rate limit exceeded",
+                "rate_limit_exceeded",
+                "429 too many requests",
+                "free-tier usage limit",
+            )
+            if any(p in chunk_lower for p in wall_patterns):
                 wall = True
         except OSError:
             pass

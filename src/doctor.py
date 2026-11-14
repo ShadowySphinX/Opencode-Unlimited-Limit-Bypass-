@@ -80,35 +80,83 @@ def main() -> int:
     else:
         _bad("warp-keeper not running & scheduled task missing — re-run install.ps1")
 
-    # 2. WARP CLI & Tunnel
-    warp_bin = find_warp_cli()
-    if not warp_bin:
-        _bad("warp-cli.exe not found — install Cloudflare WARP")
+    # 2. Egress Mode Check (WARP, Tor, or Custom Proxy)
+    mode = "warp"
+    warp_scope = "isolated"
+    try:
+        from proxy_chain import get_egress_config
+        cfg = get_egress_config()
+        mode = cfg.get("mode", "warp")
+        warp_scope = cfg.get("warp_scope", "isolated")
+    except Exception:
+        pass
+
+    print(f"  [i]  active egress mode: {mode.upper()} (scope: {warp_scope})")
+
+    if mode == "tor":
+        try:
+            from tor_manager import get_active_tor_target, is_portable_tor_running, test_socks5_alive
+            tor_target = get_active_tor_target()
+            if tor_target:
+                alive = test_socks5_alive(tor_target[1], host=tor_target[0])
+                if alive:
+                    _ok(f"Tor SOCKS5 listening on {tor_target[0]}:{tor_target[1]}")
+                else:
+                    _warn(f"Tor process detected on {tor_target[0]}:{tor_target[1]}, but SOCKS5 probe failed")
+            elif is_portable_tor_running():
+                _warn("Tor is starting up — establishing circuit...")
+            else:
+                _bad("Tor daemon not running — click 'Start Portable Tor' in app")
+        except Exception as exc:
+            _bad(f"Tor check error: {exc}")
+
+    elif mode == "custom":
+        try:
+            from proxy_chain import get_current_custom_proxy, parse_proxy_list
+            phost, pport, idx, total = get_current_custom_proxy()
+            _ok(f"custom proxy pool active: node #{idx+1}/{total} ({phost}:{pport})")
+        except Exception as exc:
+            _bad(f"custom proxy configuration error: {exc}")
+
     else:
-        connected, mode, raw = warp_status(warp_bin)
-        if connected:
-            mode_tag = f" (mode: {mode})" if mode else ""
-            _ok(f"warp tunnel: connected{mode_tag}")
+        # WARP Mode Check
+        warp_bin = find_warp_cli()
+        if not warp_bin:
+            _warn("warp-cli.exe not found — install Cloudflare WARP, or switch to Tor / Custom Proxy mode")
         else:
-            _bad(f"warp not connected ({raw or 'unknown'}) — run: opencode-unlimited-hop")
+            connected, warp_m, raw = warp_status(warp_bin)
+            if connected:
+                mode_tag = f" (mode: {warp_m})" if warp_m else ""
+                _ok(f"warp tunnel: connected{mode_tag}")
+            else:
+                _bad(f"warp not connected ({raw or 'unknown'}) — run: opencode-unlimited-hop or click Auto-Heal in app")
 
-    # 3. Local CloudflareWARP IPv6 adapter address
-    local_v6 = get_warp_local_v6()
-    if local_v6:
-        _ok(f"WARP adapter IPv6: {local_v6}")
-    else:
-        _bad("CloudflareWARP adapter IPv6 missing — ensure WARP is in TUN (warp) mode")
+        if warp_scope == "isolated":
+            try:
+                from tor_manager import test_socks5_alive
+                if test_socks5_alive(40000, host="127.0.0.1"):
+                    _ok("WARP isolated SOCKS5 proxy: active on 127.0.0.1:40000 (app-only mode)")
+                else:
+                    _warn("WARP isolated port 40000 not responding — click Auto-Heal or Rotate in app")
+            except Exception:
+                pass
+        else:
+            local_v6 = get_warp_local_v6()
+            if local_v6:
+                _ok(f"WARP adapter IPv6: {local_v6}")
+            else:
+                _warn("CloudflareWARP adapter IPv6 missing — switch to App-Only (Isolated) mode or check WARP TUN adapter")
 
-    # 4. External IPv6 egress check
+    # 4. External egress check
     egress = get_egress_v6(timeout=8.0)
     if egress:
         prefix = normalize_v6_64(egress)
         if is_cloudflare_v6(egress):
             _ok(f"egress is cloudflare (warp): {prefix}/64")
         else:
-            _bad(f"egress is NOT warp ({egress}) — check WARP mode/tunnel")
+            _ok(f"egress IP verified: {egress}")
     else:
-        _warn("no IPv6 egress check response (offline or tunnel still connecting)")
+        _warn("no external egress check response (offline, tunnel still connecting, or IPv4 only)")
 
     # 5. Guard status
     if _is_mutex_held("OpencodeUnlimitedGuard"):

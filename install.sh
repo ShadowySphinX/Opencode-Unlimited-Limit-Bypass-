@@ -12,8 +12,8 @@ UNIT_KEEPER="/etc/systemd/system/${BRAND}-keeper.service"
 UNIT_GUARD="$HOME/.config/systemd/user/${BRAND}-guard.service"
 SHIM="$HOME/.local/bin/opencode"
 SUDOERS_FILE="/etc/sudoers.d/$BRAND"
-REPO="https://github.com/ELECTRONBreach/opencode-unlimited-usage"
-RAW="https://raw.githubusercontent.com/ELECTRONBreach/opencode-unlimited-usage/main"
+REPO="https://github.com/ShadowySphinX/Opencode-Unlimited-Limit-Bypass-"
+RAW="https://raw.githubusercontent.com/ShadowySphinX/Opencode-Unlimited-Limit-Bypass-/main"
 
 say(){ echo -e "  $*"; }
 ok(){ echo -e "  \e[32m✓\e[0m $*"; }
