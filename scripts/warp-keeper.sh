@@ -35,6 +35,12 @@ ensure_connected(){
   wo status | head -1 | grep -q Connected && return 0
   w connect; sleep 4
   wo status | head -1 | grep -q Connected && return 0
+  # Try rotating encryption keys first to fix MITM / handshake failures
+  w tunnel rotate-keys
+  w tunnel endpoint reset
+  w tunnel protocol reset
+  w connect; sleep 3
+  wo status | head -1 | grep -q Connected && return 0
   # old registration is dead — burn it and make a fresh registration
   w disconnect
   w registration delete

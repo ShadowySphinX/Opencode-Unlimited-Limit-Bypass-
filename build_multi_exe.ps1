@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    Builds OpencodeUnlimited-Multi.exe (standalone multi-egress Windows GUI executable).
+    Builds OpencodeUnlimited-Multi.exe v2.4.0 (standalone multi-egress Windows GUI executable).
     Supports Cloudflare WARP /64, Tor Network (SOCKS5), Custom Proxies, and Clean Endpoints.
     Keeps OpencodeUnlimited-Avatar.exe completely untouched!
 #>

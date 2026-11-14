@@ -2,7 +2,7 @@
 # Opencode Unlimited Usage — installer
 #
 # ONE SHOT: opencode + cloudflare warp (apt/dnf/pacman, whatever your distro
-# speaks) + TUN mode + keeper + guard + lane shim + credit enforcement +
+# speaks) + TUN mode + keeper + guard + lane shim + auto-resume router +
 # self-verify. you run one line, you get a working system.
 set -u
 
@@ -24,9 +24,10 @@ SRC="$(cd "$(dirname "${BASH_SOURCE[0]:-}")" 2>/dev/null && pwd)"
 [ -n "$SRC" ] && [ -d "$SRC/scripts" ] || SRC=""   # piped-from-curl: fetch from github
 
 echo ""
-echo "  ============================="
-echo "  Opencode Unlimited Usage"
-echo "  ============================="
+echo "  ==================================================="
+echo "  Opencode Unlimited Usage (Linux v2.4.0)"
+echo "  Created & Maintained by Avatar (ShadowySphinX)"
+echo "  ==================================================="
 echo ""
 
 # ---------------------------------------------------------------- platform
@@ -155,13 +156,11 @@ swo(){ sudo -n "$WARP" --accept-tos "$@" 2>/dev/null && return 0; sudo -n "$WARP
 mkdir -p "$DEST/scripts" "$HOME/.local/bin"
 if [ -n "$SRC" ]; then
   cp "$SRC/scripts/"*.sh "$DEST/scripts/"
-  [ -f "$SRC/AGENTS.md" ] && cp "$SRC/AGENTS.md" "$DEST/AGENTS.md"
 else
   say "fetching scripts from github"
   for f in warp-keeper.sh zen-lane.sh zen-guard.sh zen-hop.sh doctor.sh; do
     curl -fsSL "$RAW/scripts/$f" -o "$DEST/scripts/$f" || die "could not fetch $f"
   done
-  curl -fsSL "$RAW/AGENTS.md" -o "$DEST/AGENTS.md" 2>/dev/null || true
 fi
 chmod +x "$DEST/scripts/"*.sh
 
@@ -256,7 +255,7 @@ systemctl --user is-active ${BRAND}-guard 2>/dev/null | grep -q active \
   && ok "zen-guard service (user): running" \
   || die "guard did not start — check: systemctl --user status ${BRAND}-guard"
 
-# ---------------------------------------------------------------- TUI shim (the lane + credit enforcement)
+# ---------------------------------------------------------------- TUI shim (the lane)
 if [ "$OC_REAL" = "$SHIM" ]; then
   cp "$SHIM" "$DEST/real-opencode" && OC_REAL="$DEST/real-opencode"
 fi
@@ -271,11 +270,6 @@ case "$V6" in
   2606:*) ok "egress is cloudflare warp: $(echo "$V6" | cut -d: -f1-4)::/64" ;;
   *) bad "egress is not warp yet — keeper is still setting up, give it a minute then run ${BRAND}-doctor" ;;
 esac
-if [ -f "$HOME/.opencode/AGENTS.md" ] && grep -q "ElectronCursed" "$HOME/.opencode/AGENTS.md"; then
-  ok "credit file active (every AI response signs off)"
-else
-  say "credit file lands on first opencode launch (lane enforces it)"
-fi
 
 case ":$PATH:" in
   *":$HOME/.local/bin:"*) ok "PATH has ~/.local/bin" ;;

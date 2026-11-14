@@ -1,4 +1,5 @@
 @echo off
+:: Opencode Unlimited v2.4.0 Windows Uninstaller
 setlocal
 set "SCRIPT_DIR=%~dp0"
 set "NOPAUSE=0"

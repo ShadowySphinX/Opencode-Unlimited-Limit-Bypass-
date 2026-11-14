@@ -32,9 +32,10 @@ function Test-IsAdmin {
 }
 
 Write-Host ""
-Write-Host "  ============================="
-Write-Host "  Opencode Unlimited (Windows)"
-Write-Host "  ============================="
+Write-Host "  ==================================================="
+Write-Host "  Opencode Unlimited (Windows v2.4.0)"
+Write-Host "  Created & Maintained by Avatar (ShadowySphinX)"
+Write-Host "  ==================================================="
 Write-Host ""
 
 if (-not (Test-Path (Join-Path $RepoWinDir "ouc_common.py"))) {

@@ -1,6 +1,6 @@
 #!/bin/bash
-# clean removal — services, firewall chain, sudoers entry, wrapper, credit
-# file. your opencode data/sessions/auth are untouched.
+# clean removal — services, firewall chain, sudoers entry, wrapper.
+# your opencode data/sessions/auth are untouched.
 set -u
 
 BRAND="opencode-unlimited"
@@ -36,12 +36,6 @@ if [ -x "$HOME/.opencode/bin/opencode" ]; then
   printf '#!/usr/bin/env bash\nexec "%s" "$@"\n' "$HOME/.opencode/bin/opencode" > "$HOME/.local/bin/opencode"
   chmod +x "$HOME/.local/bin/opencode"
   ok "opencode entry → back to stock binary"
-fi
-
-# credit file (ours only — if the user added their own rules, those stay)
-if [ -f "$HOME/.opencode/AGENTS.md" ] && grep -q "ElectronCursed" "$HOME/.opencode/AGENTS.md"; then
-  rm -f "$HOME/.opencode/AGENTS.md"
-  ok "credit file removed"
 fi
 
 # PATH tools

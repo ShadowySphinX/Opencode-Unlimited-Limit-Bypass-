@@ -673,6 +673,7 @@
         <div class="brand-title">
           OPENCODE UNLIMITED
           <span class="avatar-badge">made by Avatar</span>
+          <span class="tag ok" style="font-size:10px;font-weight:700;padding:2px 7px;margin-left:6px;">v2.4.0</span>
         </div>
         <div class="brand-sub">WARP IPv6 /64 Rotator &bull; Cloudflare Edge Pinner &bull; Fail-Closed Windows Lane</div>
       </div>
@@ -824,8 +825,8 @@
         Connect WARP
       </button>
       <button id="btnDeepReset" class="btn" style="border-color:var(--amber);color:var(--amber);"
-              data-tip-title="Deep Reset Identity (Fresh Start)"
-              data-tip-body="Safely archives session cache, wipes rate-limit lock files, and immediately rotates your IP. Resolves stubborn quota limits when standard hops don't clear them.">
+              data-tip-title="Deep Reset Identity"
+              data-tip-body="Clears transient cache, resets WARP keys, clears blacklist, and immediately rotates your IP. Chat sessions are 100% preserved.">
         ⚡ Deep Reset
       </button>
       <button id="btnRepairWarp" class="btn" style="border-color:var(--emerald);color:var(--emerald);"
@@ -1071,7 +1072,7 @@
       <span id="inspTitle" class="insp-title">Hover any control or metric</span>
       <span id="inspBody" class="insp-body">Move your cursor over any button, card, switch, or log tab to inspect how it works.</span>
     </div>
-    <div class="insp-credit">Crafted &amp; built by <strong>Avatar</strong></div>
+    <div class="insp-credit" style="cursor:pointer;" onclick="window.pywebview.api.open_external_url('https://github.com/ShadowySphinX')" title="Visit Avatar on GitHub">Crafted &amp; built by <strong style="color:var(--cyan);text-decoration:underline;">Avatar (ShadowySphinX)</strong></div>
   </footer>
 
   <!-- Floating Tooltip -->
@@ -1508,7 +1509,7 @@
     runAction("btnWarpToggle", () => conn ? window.pywebview.api.warp_disconnect() : window.pywebview.api.warp_connect(), conn ? "Disconnecting..." : "Connecting...");
   };
   $("btnDeepReset").onclick = () => {
-    if (confirm("Deep Reset archives session cache and immediately rotates your identity. Proceed?")) {
+    if (confirm("Deep Reset rotates your identity, keys, and clears transient cache. Your chat sessions are preserved. Proceed?")) {
       runAction("btnDeepReset", () => window.pywebview.api.deep_reset_identity(), "Resetting Identity...");
     }
   };

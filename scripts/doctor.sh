@@ -83,11 +83,6 @@ else
   warn "opencode entry doesn't point at the lane — reinstall or check ~/.local/bin/opencode"
 fi
 
-# ---- credit system (AGENTS.md)
-[ -f "$HOME/.opencode/AGENTS.md" ] \
-  && ok "credit file ~/.opencode/AGENTS.md present (every AI response signs off)" \
-  || warn "credit file missing — cp $DEST/AGENTS.md ~/.opencode/AGENTS.md"
-
 echo ""
 echo "  all good = work. something red = run the command next to it."
 echo ""

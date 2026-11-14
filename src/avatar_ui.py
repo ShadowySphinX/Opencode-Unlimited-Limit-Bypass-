@@ -12,6 +12,7 @@ import subprocess
 import sys
 import threading
 import time
+import webbrowser
 from pathlib import Path
 
 # Support frozen PyInstaller bundle as well as direct execution from windows/
@@ -61,7 +62,7 @@ from ouc_common import (
 )
 from ouc_firewall import install_killswitch, is_killswitch_installed, remove_killswitch
 
-WINDOW_TITLE = "Opencode Unlimited — Made by Avatar"
+WINDOW_TITLE = "Opencode Unlimited v2.4.0 — Made by Avatar"
 DETACHED_PROCESS = 0x00000008
 _WORKER_FILES = (
     "ouc_common.py",
@@ -921,33 +922,24 @@ class AvatarControlApi:
         return {"ok": True, "pool": pool, "message": f"Found {len(pool)} live opencode.ai IPv6 edges."}
 
     def deep_reset_identity(self) -> dict:
-        """Deep clean session cache & rotate identity to wipe persistent quota limits."""
-        import shutil, datetime, tempfile
-        # Terminate any running OpenCode processes so database files are not locked
-        try:
-            subprocess.run(["taskkill", "/F", "/IM", "opencode.exe", "/IM", "opencode-cli.exe"], capture_output=True)
-        except Exception:
-            pass
+        """Deep clean transient caches & rotate network identity without touching user chats/sessions."""
+        import shutil, tempfile
 
-        base_dir = Path.home() / ".local" / "share" / "opencode"
-        stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        arch_dir = base_dir / "archive" / stamp
         cleared: list[str] = []
 
+        # Clear transient client caches only (never touch opencode.db or user chat sessions!)
+        base_dir = Path.home() / ".local" / "share" / "opencode"
         if base_dir.is_dir():
-            arch_dir.mkdir(parents=True, exist_ok=True)
-            for item_name in ("auth.json", "opencode.db", "opencode.db-wal", "opencode.db-shm", "storage", "olliecode-fingerprint.json"):
+            for item_name in ("storage", "olliecode-fingerprint.json"):
                 target = base_dir / item_name
                 if target.is_file():
                     try:
-                        shutil.copy2(target, arch_dir / item_name)
                         target.unlink(missing_ok=True)
                         cleared.append(item_name)
                     except Exception:
                         pass
                 elif target.is_dir():
                     try:
-                        shutil.copytree(target, arch_dir / item_name, dirs_exist_ok=True)
                         shutil.rmtree(target, ignore_errors=True)
                         cleared.append(item_name)
                     except Exception:
@@ -965,6 +957,11 @@ class AvatarControlApi:
                     cleared.append(extra_cache.name)
                 except Exception:
                     pass
+
+        # Clear guard blacklist and reset edge override
+        self.clear_blacklist()
+        self.set_edge_override("auto")
+        self.repair_warp_connection()
 
         rot_msg = ""
         try:
@@ -987,7 +984,7 @@ class AvatarControlApi:
 
         return {
             "ok": True,
-            "message": f"Deep reset complete. Archived & cleared: {', '.join(cleared) or 'state clean'}. {rot_msg}",
+            "message": f"Deep reset complete. Cleared cache: {', '.join(cleared) or 'clean'}. Sessions preserved. {rot_msg}",
         }
 
     def clear_blacklist(self) -> dict:
@@ -1093,6 +1090,13 @@ class AvatarControlApi:
         try:
             subprocess.run(["clip.exe"], input=text, text=True, creationflags=CREATE_NO_WINDOW, timeout=3.0)
             return {"ok": True, "message": f"Copied: {text}"}
+        except Exception as exc:
+            return {"ok": False, "message": str(exc)}
+
+    def open_external_url(self, url: str) -> dict:
+        try:
+            webbrowser.open(url)
+            return {"ok": True, "url": url}
         except Exception as exc:
             return {"ok": False, "message": str(exc)}
 
