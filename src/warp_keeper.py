@@ -50,10 +50,22 @@ def ensure_connected(warp_bin: str) -> bool:
         if connected:
             return True
 
-        # If still not connected, registration might be stale or default endpoint blocked
-        append_log(KEEPER_LOG_FILE, "isolated tunnel not connected — attempting repair & clean endpoint check")
-        run_warp(["disconnect"], warp_bin=warp_bin)
+        # If still not connected, try rotating keys and clearing endpoint overrides first
+        append_log(KEEPER_LOG_FILE, "isolated tunnel not connected — rotating keys & clearing endpoint overrides")
         run_warp(["tunnel", "endpoint", "reset"], warp_bin=warp_bin)
+        run_warp(["tunnel", "protocol", "reset"], warp_bin=warp_bin)
+        run_warp(["tunnel", "rotate-keys"], warp_bin=warp_bin)
+        run_warp(["mode", "proxy"], warp_bin=warp_bin)
+        run_warp(["proxy", "port", "40000"], warp_bin=warp_bin)
+        run_warp(["connect"], warp_bin=warp_bin)
+        time.sleep(3)
+        connected, _, _ = warp_status(warp_bin)
+        if connected:
+            return True
+
+        # If still failing, re-register
+        append_log(KEEPER_LOG_FILE, "re-registering isolated tunnel")
+        run_warp(["disconnect"], warp_bin=warp_bin)
         run_warp(["registration", "delete"], warp_bin=warp_bin)
         rc, msg = run_warp(["registration", "new"], warp_bin=warp_bin)
         if rc != 0:
@@ -72,7 +84,7 @@ def ensure_connected(warp_bin: str) -> bool:
         connected, _, _ = warp_status(warp_bin)
         return connected
 
-    # Full System TUN mode
+    # Full System TUN mode (only when scope is explicitly set to full TUN)
     if mode and "warp" not in mode.lower():
         run_warp(["mode", "warp"], warp_bin=warp_bin)
     elif not mode:
@@ -88,7 +100,10 @@ def ensure_connected(warp_bin: str) -> bool:
         append_log(KEEPER_LOG_FILE, "reconnected existing registration")
         return True
 
-    append_log(KEEPER_LOG_FILE, "tunnel dead — rotating registration to repair")
+    append_log(KEEPER_LOG_FILE, "tunnel dead — rotating keys & registration to repair")
+    run_warp(["tunnel", "endpoint", "reset"], warp_bin=warp_bin)
+    run_warp(["tunnel", "protocol", "reset"], warp_bin=warp_bin)
+    run_warp(["tunnel", "rotate-keys"], warp_bin=warp_bin)
     run_warp(["disconnect"], warp_bin=warp_bin)
     run_warp(["registration", "delete"], warp_bin=warp_bin)
     rc, msg = run_warp(["registration", "new"], warp_bin=warp_bin)

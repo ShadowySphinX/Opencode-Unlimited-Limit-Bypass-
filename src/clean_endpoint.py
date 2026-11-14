@@ -76,10 +76,14 @@ def set_custom_endpoint(endpoint: str) -> tuple[bool, str]:
     if not warp_bin:
         return False, "Cloudflare warp-cli.exe not found."
 
+    # When setting custom endpoint (typically port 2408 WireGuard), switch protocol to WireGuard
+    # to avoid MASQUE HTTP/3 TLS certificate mismatch (CF_HAPPY_EYEBALLS_MITM_FAILURE).
+    run_warp(["tunnel", "protocol", "set", "WireGuard"], warp_bin=warp_bin)
     rc, msg = run_warp(["tunnel", "endpoint", "set", endpoint.strip()], warp_bin=warp_bin)
     if rc == 0:
+        run_warp(["tunnel", "rotate-keys"], warp_bin=warp_bin)
         run_warp(["connect"], warp_bin=warp_bin)
-        return True, f"Cloudflare WARP endpoint set to {endpoint}."
+        return True, f"Cloudflare WARP endpoint set to {endpoint} (WireGuard protocol)."
     return False, f"Failed to set endpoint: {msg}"
 
 
@@ -89,11 +93,11 @@ def reset_custom_endpoint() -> tuple[bool, str]:
     if not warp_bin:
         return False, "Cloudflare warp-cli.exe not found."
 
-    rc, msg = run_warp(["tunnel", "endpoint", "reset"], warp_bin=warp_bin)
-    if rc == 0:
-        run_warp(["connect"], warp_bin=warp_bin)
-        return True, "Cloudflare WARP endpoint reset to default."
-    return False, f"Failed to reset endpoint: {msg}"
+    run_warp(["tunnel", "endpoint", "reset"], warp_bin=warp_bin)
+    run_warp(["tunnel", "protocol", "reset"], warp_bin=warp_bin)
+    run_warp(["tunnel", "rotate-keys"], warp_bin=warp_bin)
+    run_warp(["connect"], warp_bin=warp_bin)
+    return True, "Cloudflare WARP endpoint and protocol reset to official default."
 
 
 def auto_heal_warp_endpoint(timeout: float = 1.0) -> tuple[bool, str]:

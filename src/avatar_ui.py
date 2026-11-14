@@ -273,6 +273,24 @@ class AvatarControlApi:
         self._action_lock = threading.Lock()
         self._refresh_egress_async(force=True)
         self._refresh_pool_async()
+        self._auto_heal_warp_startup()
+
+    def _auto_heal_warp_startup(self) -> None:
+        def _check_and_heal() -> None:
+            time.sleep(2.5)
+            wb = find_warp_cli()
+            if not wb:
+                return
+            try:
+                conn, mode, raw = warp_status(wb)
+                raw_lower = raw.lower()
+                # If WARP has handshake block, MITM error, or unstable connection on launch, self-heal automatically
+                if (not conn) or ("unstable" in raw_lower) or ("mitm" in raw_lower) or ("unable" in raw_lower):
+                    self.repair_warp_connection()
+            except Exception:
+                pass
+
+        threading.Thread(target=_check_and_heal, daemon=True).start()
 
     def _refresh_pool_async(self) -> None:
         def _run() -> None:
@@ -839,9 +857,27 @@ class AvatarControlApi:
             except Exception:
                 pass
 
-            run_warp(["disconnect"], warp_bin=wb)
+            # Phase 1: Rapid key rotation and endpoint reset (preserves active client registration)
             run_warp(["tunnel", "endpoint", "reset"], warp_bin=wb)
             run_warp(["tunnel", "protocol", "reset"], warp_bin=wb)
+            run_warp(["tunnel", "rotate-keys"], warp_bin=wb)
+            if scope == "isolated":
+                run_warp(["mode", "proxy"], warp_bin=wb)
+                run_warp(["proxy", "port", "40000"], warp_bin=wb)
+            else:
+                run_warp(["mode", "warp"], warp_bin=wb)
+            run_warp(["connect"], warp_bin=wb)
+
+            for _ in range(3):
+                time.sleep(1.0)
+                conn, _, raw = warp_status(wb)
+                raw_low = raw.lower()
+                if conn and "unstable" not in raw_low and "mitm" not in raw_low and "unable" not in raw_low:
+                    self._refresh_egress_async(force=True)
+                    return {"ok": True, "message": f"WARP encryption keys rotated successfully. Connected ({'App-Only proxy' if scope == 'isolated' else 'TUN'})!"}
+
+            # Phase 2: Full re-registration if key rotation alone did not resolve the handshake block
+            run_warp(["disconnect"], warp_bin=wb)
             run_warp(["registration", "delete"], warp_bin=wb)
             run_warp(["registration", "new"], warp_bin=wb)
             if scope == "isolated":
@@ -851,7 +887,7 @@ class AvatarControlApi:
                 run_warp(["mode", "warp"], warp_bin=wb)
             run_warp(["connect"], warp_bin=wb)
 
-            for _ in range(8):
+            for _ in range(6):
                 time.sleep(1.0)
                 conn, _, _ = warp_status(wb)
                 if conn:
