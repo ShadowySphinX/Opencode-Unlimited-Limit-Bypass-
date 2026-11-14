@@ -53,6 +53,7 @@ def ensure_connected(warp_bin: str) -> bool:
         # If still not connected, registration might be stale or default endpoint blocked
         append_log(KEEPER_LOG_FILE, "isolated tunnel not connected — attempting repair & clean endpoint check")
         run_warp(["disconnect"], warp_bin=warp_bin)
+        run_warp(["tunnel", "endpoint", "reset"], warp_bin=warp_bin)
         run_warp(["registration", "delete"], warp_bin=warp_bin)
         rc, msg = run_warp(["registration", "new"], warp_bin=warp_bin)
         if rc != 0:

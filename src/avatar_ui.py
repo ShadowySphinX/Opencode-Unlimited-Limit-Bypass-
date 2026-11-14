@@ -487,12 +487,12 @@ class AvatarControlApi:
         ok, msg = reset_custom_endpoint()
         return {"ok": ok, "message": msg}
 
-    def test_clean_endpoints(self) -> dict:
+    def test_clean_endpoints(self, timeout: float = 1.2) -> dict:
         import concurrent.futures
         from clean_endpoint import KNOWN_CLEAN_ENDPOINTS, test_endpoint_latency
 
         def _check(ep: str) -> dict:
-            lat = test_endpoint_latency(ep, timeout=1.5)
+            lat = test_endpoint_latency(ep, timeout=timeout)
             return {"endpoint": ep, "latency": lat}
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=10) as ex:
@@ -503,15 +503,50 @@ class AvatarControlApi:
         warp = find_warp_cli()
         if not warp:
             return {"ok": False, "message": "warp-cli.exe not found."}
+        scope = "isolated"
+        try:
+            from proxy_chain import get_egress_config
+            scope = get_egress_config().get("warp_scope", "isolated")
+        except Exception:
+            pass
+
         run_warp(["registration", "new"], warp_bin=warp)
-        run_warp(["mode", "warp"], warp_bin=warp)
+        if scope == "isolated":
+            run_warp(["mode", "proxy"], warp_bin=warp)
+            run_warp(["proxy", "port", "40000"], warp_bin=warp)
+        else:
+            run_warp(["mode", "warp"], warp_bin=warp)
+
         rc, msg = run_warp(["connect"], warp_bin=warp)
-        for _ in range(10):
+        for _ in range(8):
             time.sleep(1.0)
-            if get_warp_local_v6():
+            conn, _, raw = warp_status(warp)
+            if conn:
                 self._refresh_egress_async(force=True)
-                return {"ok": True, "message": "WARP connected in TUN mode."}
-        return {"ok": rc == 0, "message": msg or "WARP connect triggered; waiting for IPv6."}
+                return {"ok": True, "message": f"WARP connected ({'App-Only proxy' if scope == 'isolated' else 'Full TUN'})."}
+            if "unable" in raw.lower() or "mitm" in raw.lower():
+                break
+
+        # Auto-repair CF_HAPPY_EYEBALLS_MITM_FAILURE or broken endpoint
+        run_warp(["disconnect"], warp_bin=warp)
+        run_warp(["tunnel", "endpoint", "reset"], warp_bin=warp)
+        run_warp(["registration", "delete"], warp_bin=warp)
+        run_warp(["registration", "new"], warp_bin=warp)
+        if scope == "isolated":
+            run_warp(["mode", "proxy"], warp_bin=warp)
+            run_warp(["proxy", "port", "40000"], warp_bin=warp)
+        else:
+            run_warp(["mode", "warp"], warp_bin=warp)
+        run_warp(["connect"], warp_bin=warp)
+
+        for _ in range(6):
+            time.sleep(1.0)
+            conn, _, _ = warp_status(warp)
+            if conn:
+                self._refresh_egress_async(force=True)
+                return {"ok": True, "message": f"WARP auto-repaired and connected ({'App-Only proxy' if scope == 'isolated' else 'Full TUN'})."}
+
+        return {"ok": False, "message": "WARP connect in progress; please refresh in a moment."}
 
     def warp_disconnect(self) -> dict:
         warp = find_warp_cli()
