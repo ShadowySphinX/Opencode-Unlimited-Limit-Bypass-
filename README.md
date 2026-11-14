@@ -171,6 +171,9 @@ powershell -ExecutionPolicy Bypass -File .\build_multi_exe.ps1
 * **Blank or black window on launch:**
   * **Cause:** Missing Microsoft Edge WebView2 Evergreen Runtime.
   * **Fix:** Install the [WebView2 Runtime](https://go.microsoft.com/fwlink/p/?LinkId=2124703).
+* **Cloudflare WARP shows `Connection blocked: CF_HAPPY_EYEBALLS_MITM_FAILURE`:**
+  * **Cause:** Stale WARP encryption keys or MASQUE/WireGuard protocol handshake mismatch from custom endpoints.
+  * **Fix:** The app self-heals this automatically on launch with zero clicks. You can also click **⚡ Fix WARP (Reset Keys)** at the top of the dashboard to instantly rotate your cryptographic keys and restore healthy status.
 
 ---
 
