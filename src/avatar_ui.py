@@ -1997,7 +1997,7 @@ class AvatarControlApi:
         proxy_url = f"http://127.0.0.1:{SERVICE_PROXY_PORT}"
         env["HTTPS_PROXY"] = proxy_url
         env["HTTP_PROXY"] = proxy_url
-        env["NO_PROXY"] = "127.0.0.1,localhost,::1"
+        env["NO_PROXY"] = "127.0.0.1,localhost,::1,opentunnel.xyz"
         args_str = f"--proxy-server={proxy_url} --proxy-bypass-list=127.0.0.1;localhost;::1;*.local"
         launched = False
         if sys.platform == "win32" and hasattr(os, "startfile"):

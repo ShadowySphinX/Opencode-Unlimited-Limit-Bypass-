@@ -806,7 +806,9 @@ def acquire_mutex(name: str) -> int | None:
     """Acquire a named Windows mutex; returns handle if newly owned, else None."""
     kernel32 = ctypes.windll.kernel32
     kernel32.CreateMutexW.restype = ctypes.c_void_p
-    handle = kernel32.CreateMutexW(None, False, f"Local\\{name}")
+    # Global namespace: singleton across all sessions (Local allowed duplicates
+    # when one process ran elevated and another did not).
+    handle = kernel32.CreateMutexW(None, False, f"Global\\{name}")
     if not handle:
         return None
     err = kernel32.GetLastError()

@@ -1,8 +1,8 @@
 # PLEASE GIVE PROPER CREDITS. JUST DONT REBRAND AND LAUNCH IT AS YOURS.
-# NEW VERSION-4.0 (Fixed: shared-WARP exhaustion, Tor 403 walls, silent proxy fallback, per-user capacity caps. Adds: two-lane block relay, WarpGate pool, redesigned dashboard)
+# VERSION-4.1 (App-only WARP enforced - full TUN removed, rotation no longer drops the whole PC, chat DB protection, exit hunter. v4.0 fixes: shared-WARP exhaustion, Tor 403 walls, silent proxy fallback, per-user capacity caps)
 # Opencode-Unlimited-Limit-Bypass
 
-[![Version](https://img.shields.io/badge/Version-v4.0-22c55e?style=for-the-badge&logo=semver)](https://github.com/ShadowySphinX/Opencode-Unlimited-Limit-Bypass-)
+[![Version](https://img.shields.io/badge/Version-v4.1-22c55e?style=for-the-badge&logo=semver)](https://github.com/ShadowySphinX/Opencode-Unlimited-Limit-Bypass-)
 [![Author](https://img.shields.io/badge/Author-Avatar%20%28ShadowySphinX%29-22d3ee?style=for-the-badge&logo=github)](https://github.com/ShadowySphinX)
 [![Repository](https://img.shields.io/badge/GitHub-Opencode--Unlimited-blue?style=for-the-badge&logo=github)](https://github.com/ShadowySphinX/Opencode-Unlimited-Limit-Bypass-)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=for-the-badge)](https://opensource.org/licenses/MIT)
@@ -18,19 +18,50 @@ This tool monitors OpenCode logs for quota and rate-limit errors, cycles the act
 ---
 
 ## Table of Contents
-1. [What's New in v4.0](#whats-new-in-v40)
-2. [Prerequisites & Downloads](#prerequisites--downloads-what-you-need)
-3. [Quick Start (Windows)](#quick-start-windows)
-4. [Recommended Settings for Every Method](#recommended-settings-for-every-method)
-5. [How Limit Reset Works on Existing Chats](#how-limit-reset-works-on-existing-chats)
-6. [Restricted Regions Guide (Russia, Iran, China)](#restricted-regions-guide-russia-iran-china)
-7. [Troubleshooting Playbook ("What to do when something happens")](#troubleshooting-playbook-what-to-do-when-something-happens)
-8. [Routing Architecture](#routing-architecture)
-9. [Linux Setup (Headless & VPS)](#linux-setup-headless--vps)
-10. [Building from Source](#building-from-source)
-11. [Block Relay (stable multi-user egress)](relay/README.md)
+1. [What's New in v4.1](#whats-new-in-v41)
+2. [What's New in v4.0](#whats-new-in-v40)
+3. [Prerequisites & Downloads](#prerequisites--downloads-what-you-need)
+4. [Quick Start (Windows)](#quick-start-windows)
+5. [Recommended Settings for Every Method](#recommended-settings-for-every-method)
+6. [How Limit Reset Works on Existing Chats](#how-limit-reset-works-on-existing-chats)
+7. [Restricted Regions Guide (Russia, Iran, China)](#restricted-regions-guide-russia-iran-china)
+8. [Troubleshooting Playbook ("What to do when something happens")](#troubleshooting-playbook-what-to-do-when-something-happens)
+9. [Routing Architecture](#routing-architecture)
+10. [Linux Setup (Headless & VPS)](#linux-setup-headless--vps)
+11. [Building from Source](#building-from-source)
+12. [Block Relay (stable multi-user egress)](relay/README.md)
 
 ---
+
+## What's New in v4.1
+
+* **App-only WARP is now enforced repo-wide.** The Windows default WARP scope was
+  `tun` (Full System TUN), which routed the *entire PC* through Cloudflare and made
+  every machine-wide connection - including other tools running on the same machine -
+  drop and re-connect on each rotation. The default scope is now `isolated` (WARP
+  proxy mode: WARP only exposes a local SOCKS5 listener on `127.0.0.1:40000` and never
+  touches system routing), `set_egress_config` hard-clamps the scope so full TUN can
+  never be re-enabled, and the keeper enforces proxy mode on every tick.
+* **Rotation no longer disconnects the whole PC.** With WARP in app-only mode,
+  registration rotation (`hop`) rebuilds only the tunnel behind the local proxy.
+  Verified live: the machine's direct egress IP stays constant through a full
+  `/64` rotation, while the proxied OpenCode egress lands on a fresh `/64`.
+* **Duplicate keeper/guard fix.** `acquire_mutex` used the `Local\` namespace, which
+  allows two copies to run at once when one process is elevated and the other is not
+  (they then fight over the service proxy port). The mutex now lives in `Global\`,
+  making keeper and guard true singletons across sessions.
+* **App-only scope is hard-clamped.** `set_egress_config` and the keeper reject the
+  `tun` scope entirely, so the dashboard's scope selection cannot re-introduce
+  full-tunnel mode in a future run.
+* **Proxy-mode protocol handling.** WARP proxy mode only supports MASQUE; the keeper
+  now sets the tunnel protocol automatically when entering app-only scope (a stale
+  WireGuard pin made every connect fail with `InvalidKey("Proxy mode only supports
+  MASQUE")`).
+* **Phone pairing tunnel exempt from the proxy.** Paired phones reach the PC through
+  an end-to-end encrypted tunnel to `opentunnel.xyz` (wildcard route subdomains). That
+  tunnel now rides the machine's normal connection (`NO_PROXY` includes
+  `opentunnel.xyz` everywhere the proxy env is written), so WARP rotations and app-only
+  mode cannot break the phone to PC link. Only model inference traffic uses WARP.
 
 ## What's New in v4.0
 
@@ -196,19 +227,20 @@ Select the method that best matches your network environment:
 ### Method 1: Cloudflare WARP (Default)
 * **Best for:** General use with IPv6 `/64` rotation.
 * **Recommended Settings:**
-  * **Scope (Windows):** `Full System TUN` (keeps the WARP adapter active; recommended if App-Only mode shows no adapter).
+  * **Scope (Windows):** `App-Only (Isolated Proxy)` — this is now the enforced
+    default on all platforms. WARP runs in proxy mode and only OpenCode's traffic
+    goes through it; the rest of the PC keeps its normal connection and is never
+    touched by rotations. (Full System TUN was removed in v4.1: it routed the whole
+    PC through WARP, which disconnected every running application on each rotation.)
   * **Scope (Linux / VPS):** `App Only (Isolated)` on port `40000` (leaves the system's normal routing and SSH access in place).
-  * **Protocol:** `WireGuard` (MASQUE uses UDP 443, which some ISPs throttle or block).
+  * **Protocol:** `MASQUE` is set automatically in App-Only mode (proxy mode does not support WireGuard).
   * **Switches:** Turn ON **WARP Keeper**, **Zen Guard**, **Auto-Resume**, and **Auto-Repair**.
   * **Strict mode:** Leave it OFF for normal use. It is only for users who prefer a failed request over a direct fallback.
 
-### Method 2: Clean WireGuard Endpoints (Best for ISP Throttling / Restricted Countries)
-* **Best for:** Users in Russia, Iran, China, or university/corporate networks where Cloudflare's default Anycast IPs are throttled or blocked (`CF_HAPPY_EYEBALLS_MITM_FAILURE`).
-* **Recommended Settings:**
-  1. Open the dashboard and click the **Clean Endpoint** tab.
-  2. Click **Ping Test** (benchmarks the built-in Anycast endpoint list).
-  3. Select the node with the lowest ping (e.g. `162.159.192.1:2408` or port `500` / `4500`).
-  4. Click **Apply Endpoint**. WireGuard connects to the selected endpoint.
+### Method 2: Clean WireGuard Endpoints (Legacy — requires Full TUN, removed in v4.1)
+* **Was for:** Users in Russia, Iran, China, or university/corporate networks where Cloudflare's default Anycast IPs are throttled or blocked (`CF_HAPPY_EYEBALLS_MITM_FAILURE`).
+* **Status in v4.1:** WARP now always runs in App-Only mode, and proxy mode only supports the MASQUE protocol — WireGuard endpoints cannot be used while app-only is enforced. Clean WireGuard endpoints return only if a future version re-introduces an opt-in full-tunnel scope.
+* **Use instead:** **Method 3 (Tor Network)** for strict censorship environments, or a **Custom Proxy** (Method 4) with a WireGuard-capable upstream.
 
 ### Method 3: Tor Network (Best for Strict Censorship & Maximum Privacy)
 * **Best for:** Users whose networks completely block UDP / WireGuard traffic, or who require decentralized exit nodes.
@@ -358,7 +390,7 @@ A common concern is whether rotating limits requires starting a brand-new chat. 
   2. Press **Rotate route** (or **Re-roll**) to move to a fresh exit. In Tor mode, restart the circuit instead.
   3. Keep **Auto-Repair** on. It retires a repeatedly failing edge without changing your selected mode.
   4. Do not delete the WARP registration for this error. If WARP itself is disconnected, use **Fix WARP (Reset Keys)**.
-  5. If you use Full TUN, make sure no third-party VPN is bound to the same Wintun adapter. If you use App-Only mode, confirm `127.0.0.1:40000` is listening.
+  5. The tool always runs WARP in App-Only mode (v4.1): confirm `127.0.0.1:40000` is listening (`netstat -ano | findstr 40000`). Full TUN no longer exists, so Wintun adapter conflicts with third-party VPNs cannot occur.
 * **Honest limit:** a single reset can still come from the provider side. v3.0 makes it visible and recovers the route; it cannot make a remote server keep a stream open indefinitely.
 
 ### 3.1 What to do if OpenCode returns `503 Service Unavailable`
@@ -381,7 +413,7 @@ A common concern is whether rotating limits requires starting a brand-new chat. 
 
 ### 6. What to do if you get `CF_HAPPY_EYEBALLS_MITM_FAILURE`
 * **Cause:** MASQUE protocol (UDP 443) blocked by ISP or stale Anycast routing.
-* **Fix:** Click **Fix WARP (Reset Keys)** on the dashboard. The app automatically locks the tunnel into WireGuard mode, which bypasses MASQUE MITM checks.
+* **Fix in v4.1:** WARP now always runs App-Only (proxy mode), which requires MASQUE - the tunnel can no longer be locked into WireGuard. If your ISP blocks MASQUE (UDP 443), use **Method 3 (Tor Network)** or **Method 4 (Custom Proxy)** instead; the guard will keep those alive for you.
 
 ### 7. What to do if port 42914 or 41987 is already in use
 * **Cause:** OpenCode's managed service (42914) or this proxy (41987) did not release its socket, usually after a forced shutdown.
@@ -391,6 +423,21 @@ A common concern is whether rotating limits requires starting a brand-new chat. 
 * **Cause:** PyInstaller one-file executables are occasionally flagged by heuristics or reputation checks. This is more common for unsigned binaries.
 * **What the build does:** The build uses `--noupx` and embeds a version resource to reduce avoidable heuristic triggers.
 * **Options:** Build from source, verify the downloaded file's SHA-256 hash, or sign the executable with your own code-signing certificate (`OUC_SIGN_PFX` + `OUC_SIGN_PASSWORD`, or `OUC_SIGN_THUMBPRINT`). A trusted signature is the reliable way to clear SmartScreen reputation warnings.
+
+### 9. Phone pairing: "Can't reach this server — DESKTOP-X isn't responding"
+* **Cause:** The paired phone reaches this PC through a tunnel relay subdomain
+  (`<route>.<instance>.opentunnel.xyz`), where `<route>` is the `remote.route` value in
+  `%USERPROFILE%\.config\opencode\service.json`. If that route is regenerated (identity
+  reset, re-install, daemon data-dir swap), the phone keeps knocking on the old
+  subdomain and the relay has no tunnel behind it.
+* **Fix:** Restore the route your phone has saved: set `remote.route` in
+  `%USERPROFILE%\.config\opencode\service.json` back to the value embedded in the
+  phone's URL (the first dot-label of the subdomain), then restart OpenCode Desktop.
+  The tunnel reconnects over the machine's normal connection - it is exempt from WARP
+  (`NO_PROXY` includes `opentunnel.xyz`) - and the phone reopens the session
+  automatically.
+* **Alternative:** Re-pair from scratch (Pairing → **Pair device**) and re-save the
+  phone homescreen with the new URL.
 
 ---
 
@@ -406,12 +453,12 @@ A common concern is whether rotating limits requires starting a brand-new chat. 
    | Active egress mode                                            |
    +--------+------------------------------------------------------+
             |
-            +-- [1] WARP Full TUN      -> Wintun adapter -> system-wide Cloudflare VPN
-            +-- [2] WARP Isolated      -> 127.0.0.1:40000 SOCKS5 -> Cloudflare edge / fresh /64
-            +-- [3] Clean Endpoint     -> clean WireGuard IP:2408 -> selected Anycast edge
-            +-- [4] Tor Network        -> 127.0.0.1:9050 / 9150 -> 3-hop circuit / fresh IPv4
-            +-- [5] Custom Proxy Pool  -> node #1 -> node #2 -> ... -> verified upstream
-            +-- [6] Block Relay        -> TLS CONNECT -> VPS router
+            +-- [1] WARP App-Only      -> 127.0.0.1:40000 SOCKS5 -> Cloudflare edge / fresh /64
+            |                          (Full System TUN was removed in v4.1: it routed the whole PC)
+            +-- [2] Clean Endpoint     -> clean WireGuard IP:2408 -> selected Anycast edge
+            +-- [3] Tor Network        -> 127.0.0.1:9050 / 9150 -> 3-hop circuit / fresh IPv4
+            +-- [4] Custom Proxy Pool  -> node #1 -> node #2 -> ... -> verified upstream
+            +-- [5] Block Relay        -> TLS CONNECT -> VPS router
                                             |
                                             +-- prefix   -> bind routed IPv6 -> fresh /64
                                             +-- warpgate -> WARP exit N      -> fresh /64

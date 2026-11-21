@@ -46,7 +46,8 @@ def _relay_ssl_context() -> ssl.SSLContext:
 
 
 def get_default_warp_scope() -> str:
-    return "tun" if sys.platform == "win32" else "isolated"
+    # App-only by default: WARP must never take over the whole PC
+    return "isolated"
 
 
 def get_egress_config() -> dict:
@@ -79,7 +80,9 @@ def set_egress_config(
     if warp_scope is None or not warp_scope.strip():
         chosen_scope = get_default_warp_scope()
     else:
-        chosen_scope = "tun" if warp_scope.lower().strip() == "tun" else "isolated"
+        # Hard clamp: WARP is app-only (proxy mode). Full-tunnel would route the
+        # entire PC (and ZCode) through WARP and drop on every rotation.
+        chosen_scope = "isolated"
     cfg = {
         "mode": mode,
         "warp_scope": chosen_scope,

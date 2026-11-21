@@ -148,7 +148,7 @@ def main() -> int:
     env["HTTP_PROXY"] = proxy_url
     env["https_proxy"] = proxy_url
     env["http_proxy"] = proxy_url
-    env["NO_PROXY"] = "127.0.0.1,localhost,::1"
+    env["NO_PROXY"] = "127.0.0.1,localhost,::1,opentunnel.xyz"
     env["no_proxy"] = "127.0.0.1,localhost,::1"
 
     launch_args = list(args)

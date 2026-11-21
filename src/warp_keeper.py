@@ -40,6 +40,8 @@ _last_repair = 0.0
 _warp_down_ticks = 0
 
 
+
+
 def _hand_over_to_tor(mode: str) -> bool:
     """Run the lane on Tor when WARP will not connect.
 
@@ -85,7 +87,7 @@ def _heartbeat() -> None:
 
 
 def _active_scope() -> str:
-    default_scope = "tun" if sys.platform == "win32" else "isolated"
+    default_scope = "isolated"  # app-only: WARP must never touch the whole PC
     try:
         from proxy_chain import get_egress_config
 
@@ -273,6 +275,7 @@ def main() -> int:
                 break
             time.sleep(8)
 
+
     while True:
         try:
             _heartbeat()
@@ -339,6 +342,7 @@ def main() -> int:
                     pass
         except Exception as exc:
             append_log(KEEPER_LOG_FILE, f"keeper error: {exc}")
+
         time.sleep(TICK_SECONDS)
 
 
