@@ -422,6 +422,16 @@ def ensure_warp_protocol(desired: str = "wireguard", warp_bin: str | None = None
     return rc == 0
 
 
+def warp_protocol_for_scope(scope: str) -> str:
+    """Return the tunnel protocol the selected scope can actually use.
+
+    Cloudflare's client refuses proxy mode on WireGuard with "Proxy mode only
+    supports MASQUE", so app-only has to run MASQUE. Full TUN keeps the
+    WireGuard path the endpoint and rotation code expect.
+    """
+    return "masque" if str(scope).strip().lower() == "isolated" else "wireguard"
+
+
 def warp_status(warp_bin: str | None = None, force: bool = False) -> tuple[bool, str, str]:
     """Return (is_connected, mode_name, status_text) for WARP."""
     exe = warp_bin or find_warp_cli() or ""
@@ -802,34 +812,74 @@ def keeper_pause_ctx(reason: str, seconds: int = 180) -> Iterator[None]:
             pass
 
 
+_MUTEX_SYNCHRONIZE = 0x00100000
+_MUTEX_ERROR_ALREADY_EXISTS = 183
+
+
+def _mutex_names(name: str) -> tuple[str, str]:
+    """Return both namespaces a worker mutex can live in.
+
+    A Local\\ mutex only exists inside the session that created it, so a worker
+    started by a scheduled task can be invisible to the dashboard that asks
+    about it. The Global\\ spelling is machine wide, but creating it needs a
+    privilege a standard user lacks, so both are tried.
+    """
+    return f"Global\\{name}", f"Local\\{name}"
+
+
+def _open_mutex(path: str) -> int | None:
+    """Return a handle to an existing mutex, or None when it does not exist."""
+    kernel32 = ctypes.windll.kernel32
+    kernel32.OpenMutexW.restype = ctypes.c_void_p
+    kernel32.OpenMutexW.argtypes = [
+        ctypes.c_uint32,
+        ctypes.c_int32,
+        ctypes.c_wchar_p,
+    ]
+    handle = kernel32.OpenMutexW(_MUTEX_SYNCHRONIZE, False, path)
+    return int(handle) if handle else None
+
+
 def acquire_mutex(name: str) -> int | None:
     """Acquire a named Windows mutex; returns handle if newly owned, else None."""
     kernel32 = ctypes.windll.kernel32
     kernel32.CreateMutexW.restype = ctypes.c_void_p
-    handle = kernel32.CreateMutexW(None, False, f"Local\\{name}")
-    if not handle:
-        return None
-    err = kernel32.GetLastError()
-    ERROR_ALREADY_EXISTS = 183
-    if err == ERROR_ALREADY_EXISTS:
-        kernel32.CloseHandle(ctypes.c_void_p(handle))
-        return None
-    return int(handle)
+    kernel32.CreateMutexW.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_int32,
+        ctypes.c_wchar_p,
+    ]
+    global_name, local_name = _mutex_names(name)
+    for path, other in ((global_name, local_name), (local_name, global_name)):
+        # Another worker may hold the other spelling of the name; only one
+        # keeper (or guard) may run at a time.
+        held = _open_mutex(other)
+        if held:
+            kernel32.CloseHandle(ctypes.c_void_p(held))
+            return None
+        handle = kernel32.CreateMutexW(None, False, path)
+        if not handle:
+            continue  # Global\ needs a privilege a standard user lacks
+        if kernel32.GetLastError() == _MUTEX_ERROR_ALREADY_EXISTS:
+            kernel32.CloseHandle(ctypes.c_void_p(handle))
+            return None
+        return int(handle)
+    return None
 
 
 def is_mutex_held(name: str) -> bool:
-    """True while another process owns a worker mutex.
+    """True while another process owns a worker mutex, in either namespace.
 
     Liveness of the keeper and guard is defined by their named mutex: the
     process takes it on start and Windows drops it when the process ends, so it
     cannot go stale the way a heartbeat file can.
     """
     kernel32 = ctypes.windll.kernel32
-    kernel32.OpenMutexW.restype = ctypes.c_void_p
-    handle = kernel32.OpenMutexW(0x00100000, False, f"Local\\{name}")
-    if handle:
-        kernel32.CloseHandle(ctypes.c_void_p(handle))
-        return True
+    for path in _mutex_names(name):
+        handle = _open_mutex(path)
+        if handle:
+            kernel32.CloseHandle(ctypes.c_void_p(handle))
+            return True
     return False
 
 
@@ -937,13 +987,24 @@ def _current_warp_scope() -> str:
 
 
 def ensure_warp_mode(warp_bin: str, scope: str) -> None:
-    """Put warp-cli into the operation mode required by the selected scope."""
-    desired = "proxy" if scope == "isolated" else "warp"
-    if warp_mode(warp_bin=warp_bin) == desired:
-        return
+    """Put warp-cli into the operation mode required by the selected scope.
+
+    The protocol always travels with the mode. Moving to proxy mode sets MASQUE
+    first, because a proxy client still on WireGuard refuses the connection and
+    drops the machine off the tunnel. Moving back to TUN flips the mode first,
+    because the proxy client rejects a protocol change while it serves proxy.
+    """
+    desired = "proxy" if str(scope).strip().lower() == "isolated" else "warp"
+    current = warp_mode(warp_bin=warp_bin)
     if desired == "proxy":
-        run_warp(["proxy", "port", "40000"], warp_bin=warp_bin, timeout=10.0)
-    run_warp(["mode", desired], warp_bin=warp_bin, timeout=10.0)
+        ensure_warp_protocol("masque", warp_bin=warp_bin)
+        if current != "proxy":
+            run_warp(["proxy", "port", "40000"], warp_bin=warp_bin, timeout=10.0)
+            run_warp(["mode", "proxy"], warp_bin=warp_bin, timeout=10.0)
+        return
+    if current != "warp":
+        run_warp(["mode", "warp"], warp_bin=warp_bin, timeout=10.0)
+    ensure_warp_protocol("wireguard", warp_bin=warp_bin)
 
 
 def warp_registration_healthy(warp_bin: str) -> bool:
@@ -1051,7 +1112,6 @@ def hop_report(
 
     scope = _current_warp_scope()
     ensure_warp_mode(warp_bin, scope)
-    ensure_warp_protocol("wireguard", warp_bin=warp_bin)
 
     seen = ""
     # A disconnected tunnel cannot produce a /64. Reconnecting a few times is

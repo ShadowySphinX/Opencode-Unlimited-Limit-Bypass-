@@ -16,7 +16,6 @@ from ouc_common import (
     append_log,
     ensure_dirs,
     ensure_warp_mode,
-    ensure_warp_protocol,
     find_warp_cli,
     is_admin,
     is_keeper_paused,
@@ -104,8 +103,9 @@ def _wait_connected(warp_bin: str, attempts: int = 10) -> bool:
 
 
 def _connect(warp_bin: str, scope: str) -> bool:
+    # ensure_warp_mode also applies the protocol the scope needs, so an app-only
+    # reconnect stays on MASQUE instead of being pushed back to WireGuard.
     ensure_warp_mode(warp_bin, scope)
-    ensure_warp_protocol("wireguard", warp_bin=warp_bin)
     run_warp(["connect"], warp_bin=warp_bin, timeout=12.0)
     return _wait_connected(warp_bin)
 

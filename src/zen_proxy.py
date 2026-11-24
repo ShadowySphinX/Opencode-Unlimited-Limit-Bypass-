@@ -831,7 +831,6 @@ def _repair_warp_tunnel(warp_state: _WarpState) -> bool:
     try:
         from ouc_common import (
             ensure_warp_mode,
-            ensure_warp_protocol,
             find_warp_cli,
             repair_warp_registration,
             run_warp,
@@ -844,10 +843,6 @@ def _repair_warp_tunnel(warp_state: _WarpState) -> bool:
         if not warp_registration_healthy(warp_bin):
             if not repair_warp_registration(warp_bin, 2):
                 return False
-        try:
-            ensure_warp_protocol("wireguard", warp_bin=warp_bin)
-        except Exception:
-            pass
         ensure_warp_mode(warp_bin, scope)
         run_warp(["connect"], warp_bin=warp_bin, timeout=12.0)
         for _ in range(8):

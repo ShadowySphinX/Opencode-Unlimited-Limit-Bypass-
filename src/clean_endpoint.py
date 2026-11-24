@@ -7,7 +7,27 @@ import re
 import socket
 import subprocess
 import time
-from ouc_common import find_warp_cli, run_warp, warp_status
+from ouc_common import (
+    find_warp_cli,
+    run_warp,
+    warp_protocol_for_scope,
+    warp_status,
+)
+
+
+def _active_warp_scope() -> str:
+    """Scope the WARP client is configured for; app-only needs MASQUE."""
+    try:
+        from proxy_chain import get_egress_config
+
+        cfg = get_egress_config()
+        return str(cfg.get("warp_scope", "")) or _default_scope()
+    except Exception:
+        return _default_scope()
+
+
+def _default_scope() -> str:
+    return "tun" if platform.system() == "Windows" else "isolated"
 
 KNOWN_CLEAN_ENDPOINTS = (
     # Standard Cloudflare WireGuard (Port 2408)
@@ -77,11 +97,14 @@ def set_custom_endpoint(endpoint: str) -> tuple[bool, str]:
     if not warp_bin:
         return False, "Cloudflare warp-cli.exe not found."
 
-    # Ensure WireGuard protocol is active to avoid MASQUE HTTP/3 MITM errors (CF_HAPPY_EYEBALLS_MITM_FAILURE).
-    # Only set protocol if not already WireGuard, to prevent unnecessary tunnel teardown.
+    # Full TUN connects with WireGuard, which avoids MASQUE HTTP/3 MITM errors
+    # (CF_HAPPY_EYEBALLS_MITM_FAILURE); proxy mode is MASQUE only, so the
+    # endpoint switch has to keep the protocol the active scope requires.
+    proto = warp_protocol_for_scope(_active_warp_scope())
+    label = "MASQUE" if proto == "masque" else "WireGuard"
     try:
         from ouc_common import ensure_warp_protocol
-        ensure_warp_protocol("wireguard", warp_bin=warp_bin)
+        ensure_warp_protocol(proto, warp_bin=warp_bin)
     except Exception:
         pass
 
@@ -96,7 +119,7 @@ def set_custom_endpoint(endpoint: str) -> tuple[bool, str]:
             raw_low = (raw or "").lower()
             # "unstable" only means elevated latency; traffic still flows.
             if conn and "unable" not in raw_low and "mitm" not in raw_low:
-                return True, f"Cloudflare WARP endpoint connected to {endpoint} (WireGuard)."
+                return True, f"Cloudflare WARP endpoint connected to {endpoint} ({label})."
         detail = (raw or "").strip()
         return False, (
             f"Endpoint {endpoint} was set but WARP did not connect"
@@ -114,9 +137,11 @@ def reset_custom_endpoint() -> tuple[bool, str]:
     rc, msg = run_warp(["tunnel", "endpoint", "reset"], warp_bin=warp_bin)
     if rc != 0:
         return False, f"Failed to reset the WARP endpoint: {msg}"
+    proto = warp_protocol_for_scope(_active_warp_scope())
+    label = "MASQUE" if proto == "masque" else "WireGuard"
     try:
         from ouc_common import ensure_warp_protocol
-        ensure_warp_protocol("wireguard", warp_bin=warp_bin)
+        ensure_warp_protocol(proto, warp_bin=warp_bin)
     except Exception:
         pass
     run_warp(["tunnel", "rotate-keys"], warp_bin=warp_bin)
@@ -126,7 +151,7 @@ def reset_custom_endpoint() -> tuple[bool, str]:
         time.sleep(0.8)
         conn, _, raw = warp_status(warp_bin, force=True)
         if conn:
-            return True, "Cloudflare WARP endpoint reset to the default (WireGuard protocol)."
+            return True, f"Cloudflare WARP endpoint reset to the default ({label} protocol)."
     detail = (raw or "").strip()
     return False, (
         "Endpoint reset, but WARP did not reconnect"
