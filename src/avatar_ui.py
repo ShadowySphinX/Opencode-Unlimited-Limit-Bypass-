@@ -1302,11 +1302,6 @@ class AvatarControlApi:
         if warp and changed:
             if not warp_registration_healthy(warp):
                 repair_warp_registration(warp, 3)
-            try:
-                from ouc_common import ensure_warp_protocol
-                ensure_warp_protocol("wireguard", warp_bin=warp)
-            except Exception:
-                pass
             ensure_warp_mode(warp, clean_scope)
             run_warp(["connect"], warp_bin=warp)
             connected = False
@@ -1352,11 +1347,6 @@ class AvatarControlApi:
                 scope = current.get("warp_scope", default_scope)
                 if not warp_registration_healthy(warp):
                     repair_warp_registration(warp, 3)
-                try:
-                    from ouc_common import ensure_warp_protocol
-                    ensure_warp_protocol("wireguard", warp_bin=warp)
-                except Exception:
-                    pass
                 ensure_warp_mode(warp, scope)
                 run_warp(["connect"], warp_bin=warp)
                 connected = False
@@ -1822,12 +1812,6 @@ class AvatarControlApi:
             try:
                 from proxy_chain import get_egress_config
                 scope = get_egress_config().get("warp_scope", default_scope)
-            except Exception:
-                pass
-
-            try:
-                from ouc_common import ensure_warp_protocol
-                ensure_warp_protocol("wireguard", warp_bin=wb)
             except Exception:
                 pass
 

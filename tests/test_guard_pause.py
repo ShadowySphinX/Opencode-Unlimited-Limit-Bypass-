@@ -216,14 +216,38 @@ class GuardGateTests(unittest.TestCase):
 
         self.assertFalse(zen_guard._work_is_live())
 
-    def _write_tunnels(self, count: int, age: float = 0.0) -> None:
+    def _write_tunnels(
+        self, count: int, age: float = 0.0, byte_age: float | None = None
+    ) -> None:
         stamp = int(time.time() - age)
+        data = {"active_tunnels": count, "active_tunnels_ts": stamp}
+        if byte_age is not None:
+            data["last_byte_ts"] = int(time.time() - byte_age)
         (self.lane / "proxy_status.json").write_text(
-            json.dumps({"active_tunnels": count, "active_tunnels_ts": stamp}),
-            encoding="utf-8",
+            json.dumps(data), encoding="utf-8"
         )
 
-    def test_open_proxy_tunnel_counts_as_live_with_a_quiet_log(self) -> None:
+    def test_idle_tunnel_with_a_quiet_log_is_not_live(self) -> None:
+        # An open keep-alive socket used to hold rotations back for the whole
+        # cap even though nothing was being generated.
+        stamp = time.time() - zen_guard.QUIET_SECONDS - 30
+        import os
+
+        os.utime(self.opencode_log, (stamp, stamp))
+        self._write_tunnels(1, byte_age=zen_guard.QUIET_SECONDS + 5)
+
+        self.assertFalse(zen_guard._work_is_live())
+
+    def test_tunnel_that_relayed_bytes_counts_as_live(self) -> None:
+        stamp = time.time() - zen_guard.QUIET_SECONDS - 30
+        import os
+
+        os.utime(self.opencode_log, (stamp, stamp))
+        self._write_tunnels(1, byte_age=2)
+
+        self.assertTrue(zen_guard._work_is_live())
+
+    def test_old_proxy_tunnel_count_still_counts_as_live(self) -> None:
         stamp = time.time() - zen_guard.QUIET_SECONDS - 30
         import os
 
