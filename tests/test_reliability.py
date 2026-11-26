@@ -389,6 +389,44 @@ class DoorHoldTests(unittest.TestCase):
         repair.assert_not_called()
 
 
+class TunnelByteActivityTests(unittest.TestCase):
+    """The proxy publishes byte activity so an idle socket is not 'streaming'."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self.tmp.name)
+        self._saved = (zen_proxy.LANE_DIR, zen_proxy.PROXY_STATUS_FILE)
+        zen_proxy.LANE_DIR = self.dir
+        zen_proxy.PROXY_STATUS_FILE = self.dir / "proxy_status.json"
+        zen_proxy._reset_tunnel_activity()
+
+    def tearDown(self) -> None:
+        zen_proxy._reset_tunnel_activity()
+        zen_proxy.LANE_DIR, zen_proxy.PROXY_STATUS_FILE = self._saved
+        self.tmp.cleanup()
+
+    def status(self) -> dict:
+        return json.loads(zen_proxy.PROXY_STATUS_FILE.read_text(encoding="utf-8"))
+
+    def test_an_idle_tunnel_publishes_no_byte_stamp(self) -> None:
+        zen_proxy._enter_tunnel()
+
+        status = self.status()
+        self.assertEqual(status["active_tunnels"], 1)
+        self.assertEqual(status["last_byte_ts"], 0)
+
+    def test_a_relayed_byte_updates_the_published_stamp(self) -> None:
+        zen_proxy._enter_tunnel()
+        try:
+            zen_proxy._note_tunnel_bytes()
+        finally:
+            zen_proxy._leave_tunnel()
+
+        status = self.status()
+        self.assertGreater(status["last_byte_ts"], 0)
+        self.assertLessEqual(status["last_byte_ts"], int(time.time()))
+
+
 class RegistrationBackoffTests(unittest.TestCase):
     def test_retries_wait_longer_each_time(self) -> None:
         sleeps: list[float] = []

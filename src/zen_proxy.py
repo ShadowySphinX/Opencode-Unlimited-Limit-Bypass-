@@ -66,6 +66,13 @@ _STREAM_RESET_LOCK = threading.Lock()
 _LAST_STREAM_RESET_NOTE = 0.0
 _TUNNEL_LOCK = threading.Lock()
 _ACTIVE_TUNNELS = 0
+_BYTE_LOCK = threading.Lock()
+_LAST_BYTE_TS = 0.0
+_LAST_BYTE_PUBLISH = 0.0
+# A stream relays chunks continuously, so the guard only needs a stamp that is
+# a few seconds old. Rewriting the status file on every chunk would put a disk
+# write in the middle of the data path.
+BYTE_PUBLISH_INTERVAL = 2.0
 
 # Kinds that describe a failed route rather than a lifecycle note.
 ERROR_KINDS = {
@@ -175,16 +182,40 @@ def _active_tunnels() -> int:
         return _ACTIVE_TUNNELS
 
 
+def _last_byte_ts() -> float:
+    with _BYTE_LOCK:
+        return _LAST_BYTE_TS
+
+
 def _publish_tunnel_count() -> None:
-    """Mirror the live tunnel count into proxy_status for the guard and dashboard."""
+    """Mirror the tunnel count and byte activity into proxy_status.
+
+    The guard uses these fields to tell a streaming response from an idle
+    socket, so the last byte has to be published alongside the count.
+    """
     try:
         with STATUS_LOCK:
             data = _read_proxy_status()
             data["active_tunnels"] = _active_tunnels()
             data["active_tunnels_ts"] = int(time.time())
+            data["last_byte_ts"] = int(_last_byte_ts())
             _write_proxy_status(data)
     except Exception:
         pass
+
+
+def _note_tunnel_bytes() -> None:
+    """Record that a tunnel relayed bytes, throttled to one status write per interval."""
+    global _LAST_BYTE_TS, _LAST_BYTE_PUBLISH
+    now = time.time()
+    publish = False
+    with _BYTE_LOCK:
+        _LAST_BYTE_TS = now
+        if now - _LAST_BYTE_PUBLISH >= BYTE_PUBLISH_INTERVAL:
+            _LAST_BYTE_PUBLISH = now
+            publish = True
+    if publish:
+        _publish_tunnel_count()
 
 
 def _enter_tunnel() -> None:
@@ -199,6 +230,16 @@ def _leave_tunnel() -> None:
     with _TUNNEL_LOCK:
         _ACTIVE_TUNNELS = max(0, _ACTIVE_TUNNELS - 1)
     _publish_tunnel_count()
+
+
+def _reset_tunnel_activity() -> None:
+    """Drop the counters a previous server left behind in this process."""
+    global _ACTIVE_TUNNELS, _LAST_BYTE_TS, _LAST_BYTE_PUBLISH
+    with _TUNNEL_LOCK:
+        _ACTIVE_TUNNELS = 0
+    with _BYTE_LOCK:
+        _LAST_BYTE_TS = 0.0
+        _LAST_BYTE_PUBLISH = 0.0
 
 
 def _clear_fallback() -> None:
@@ -555,6 +596,7 @@ def _relay(
                     seen_data.add(src)
                     try:
                         dst.sendall(data)
+                        _note_tunnel_bytes()
                     except (OSError, ConnectionResetError) as exc:
                         # A failed write toward the client means the client went
                         # away; only a write toward the upstream host says
@@ -1135,8 +1177,10 @@ def start_proxy_server(port: int = 0) -> tuple[_ThreadedTCPServer, int, str]:
         raise
     actual_port = srv.server_address[1]
     _clear_fallback()
-    # A fresh proxy owns no tunnels; republishing zero clears the count left by
-    # the process it replaces so the guard does not wait on a phantom stream.
+    # A fresh proxy owns no tunnels; republishing zero clears the count and the
+    # byte stamp left by the process it replaces so the guard does not wait on
+    # a phantom stream.
+    _reset_tunnel_activity()
     _publish_tunnel_count()
     _record_event(
         "start",

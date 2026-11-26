@@ -66,15 +66,14 @@ STUCK_LOOKBACK = 12 * 3600
 STUCK_RETRY_SECONDS = 15 * 60
 OPENCODE_DB_FILE = Path.home() / ".local" / "share" / "opencode" / "opencode.db"
 # Reconnecting WARP tears the tunnel adapter down, which resets every live
-# socket. A rotation therefore waits for a quiet window: no OpenCode log writes
-# for this long means no request is mid-stream. The wait is capped so a busy
-# session cannot block rotation forever.
+# socket. A rotation therefore waits for a quiet window: no bytes relayed and
+# no OpenCode log writes for this long means no request is mid-stream. The wait
+# is capped so a busy session cannot block rotation forever.
 QUIET_SECONDS = 45
 QUIET_MAX_WAIT = 180
-# The local proxy publishes its live tunnel count, but only when a tunnel
-# opens or closes: an address held open for minutes keeps its original stamp.
-# The snapshot therefore stays trusted for longer than the rotation wait it
-# feeds, and a restarted proxy republishes zero on start.
+# A proxy from before byte tracking publishes only its live tunnel count, and
+# only when a tunnel opens or closes. That snapshot stays trusted for longer
+# than the rotation wait it feeds, and a restarted proxy republishes zero.
 TUNNEL_STATUS_MAX_AGE = QUIET_MAX_WAIT + 60
 
 
@@ -363,14 +362,17 @@ def _pause_left(state: dict, now: int) -> int:
     return until - now
 
 
-def _proxy_has_tunnels(now: float) -> bool:
-    """True while the local proxy reports an open upstream tunnel."""
+def _proxy_status() -> dict:
+    """The local proxy's published status, or an empty dict when unreadable."""
     try:
         data = json.loads((LANE_DIR / "proxy_status.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        return False
-    if not isinstance(data, dict):
-        return False
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _proxy_has_tunnels(data: dict, now: float) -> bool:
+    """True while the local proxy reports an open upstream tunnel."""
     try:
         count = int(data.get("active_tunnels", 0) or 0)
         stamp = float(data.get("active_tunnels_ts", 0) or 0)
@@ -379,16 +381,36 @@ def _proxy_has_tunnels(now: float) -> bool:
     return count > 0 and now - stamp <= TUNNEL_STATUS_MAX_AGE
 
 
+def _proxy_moved_bytes(data: dict, now: float) -> bool:
+    """True while the proxy relayed bytes within the quiet window.
+
+    An open tunnel is not proof of work: OpenCode keeps idle keep-alive
+    sockets, and one of those used to hold every rotation back for the whole
+    cap. The proxy stamps the last byte it relayed, so a tunnel only counts as
+    live while data is actually moving.
+    """
+    try:
+        stamp = float(data.get("last_byte_ts", 0) or 0)
+    except (TypeError, ValueError):
+        return False
+    return stamp > 0 and now - stamp < QUIET_SECONDS
+
+
 def _work_is_live(now: float | None = None) -> bool:
     """True while a response may be streaming.
 
     A long stream writes its log line when it starts and when it finishes, so
-    the log's mtime says nothing about the middle of one. The proxy's live
-    tunnel count is the direct signal; the recent log write also covers the
-    moment before the proxy accepts the CONNECT.
+    the log's mtime says nothing about the middle of one. The proxy's last byte
+    stamp is the direct signal; the recent log write also covers the moment
+    before the proxy accepts the CONNECT. A proxy from before byte tracking
+    publishes no stamp, and its tunnel count is all that can be trusted there.
     """
     now = time.time() if now is None else now
-    if _proxy_has_tunnels(now):
+    status = _proxy_status()
+    if "last_byte_ts" in status:
+        if _proxy_moved_bytes(status, now):
+            return True
+    elif _proxy_has_tunnels(status, now):
         return True
     try:
         age = now - OPENCODE_LOG_FILE.stat().st_mtime
