@@ -30,13 +30,11 @@ import base64
 import hashlib
 import ipaddress
 import json
-import os
 import secrets
 import signal
 import socket
 import sqlite3
 import ssl
-import sys
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -378,10 +376,10 @@ class Store:
 
     def _iter_blocks(self, cfg: Config):
         offset_base = int(self.get_setting("cursor", "0"))
-        candidates: list[ipaddress.IPv6Network] = []
+        candidates: list[tuple[ipaddress.IPv6Network, int]] = []
         for net in cfg.blocks:
             count = 1 << (BLOCK_PREFIX - net.prefixlen)
-            candidates.append((net, count))  # type: ignore[arg-type]
+            candidates.append((net, count))
         total = sum(count for _, count in candidates)
         cursor = offset_base % max(1, total)
         remaining = total
@@ -618,7 +616,13 @@ class Store:
                 )
                 self.conn.commit()
             raise RuntimeError("no free blocks left; add another prefix or relay")
-        self.conn.execute("UPDATE clients SET block=? WHERE id=?", (block, client_id))
+        # A rotated block always comes from the prefix lane, so the client must
+        # leave any WarpGate lease behind; keeping the old lane would route the
+        # prefix block through an instance that never answers from it.
+        self.conn.execute(
+            "UPDATE clients SET block=?, lane='prefix', upstream='' WHERE id=?",
+            (block, client_id),
+        )
         self.conn.commit()
         self.bind_block(block, client_id)
         return old, block
@@ -732,9 +736,11 @@ def resolve_aaaa(host: str, port: int, timeout: float = 8.0) -> list[tuple]:
         return infos
     # Some resolvers return only A records for hosts that do have AAAA.  Ask
     # Cloudflare's DoH resolver directly as a fallback, then connect by address.
+    import urllib.parse
     import urllib.request
 
-    url = f"https://cloudflare-dns.com/dns-query?name={host}&type=AAAA"
+    query = urllib.parse.quote(host, safe="")
+    url = f"https://cloudflare-dns.com/dns-query?name={query}&type=AAAA"
     req = urllib.request.Request(url, headers={"Accept": "application/dns-json"})
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
@@ -1346,16 +1352,16 @@ class Relay:
             sem.release()
             return
 
-        writer.write(b"HTTP/1.1 200 Connection Established\r\n\r\n")
         try:
-            await writer.drain()
-        except Exception:
-            pass
-        self.store.touch(str(client["id"]), route.block)
-        try:
+            writer.write(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+            try:
+                await writer.drain()
+            except Exception:
+                pass
+            self.store.touch(str(client["id"]), route.block)
             await asyncio.gather(
-                self._pump(reader, upstream_writer, "client"),
-                self._pump(upstream_reader, writer, "upstream"),
+                self._pump(reader, upstream_writer),
+                self._pump(upstream_reader, writer),
             )
         finally:
             sem.release()
@@ -1369,7 +1375,6 @@ class Relay:
         self,
         reader: asyncio.StreamReader,
         writer: asyncio.StreamWriter,
-        side: str,
     ) -> None:
         try:
             while True:
@@ -1400,10 +1405,12 @@ class Relay:
         body = b""
         try:
             length = int(headers.get("content-length", "0") or "0")
+            if not 0 <= length <= 1_048_576:
+                raise ValueError("request body too large")
             if length:
                 body = await asyncio.wait_for(reader.readexactly(length), 10)
         except Exception:
-            pass
+            body = b""
         payload: dict[str, Any] = {}
         if body:
             try:
@@ -1491,6 +1498,7 @@ class Relay:
                     "ok": True,
                     "client_id": str(client["id"]),
                     "requests": client["requests"],
+                    "resets_at": utc_midnight(),
                     "stats": await self.stats(),
                 }
                 payload.update(route.as_dict())

@@ -198,7 +198,7 @@ Select the method that best matches your network environment:
 * **Recommended Settings:**
   * **Scope (Windows):** `Full System TUN` (keeps the WARP adapter active; recommended if App-Only mode shows no adapter).
   * **Scope (Linux / VPS):** `App Only (Isolated)` on port `40000` (leaves the system's normal routing and SSH access in place).
-  * **Protocol:** `WireGuard` (MASQUE uses UDP 443, which some ISPs throttle or block).
+  * **Protocol:** follows the scope. `Full System TUN` uses `WireGuard`; `App Only (Isolated)` requires `MASQUE`, because current WARP clients reject proxy mode on WireGuard. If your ISP blocks MASQUE (UDP 443), use `Full System TUN` with `WireGuard` instead.
   * **Switches:** Turn ON **WARP Keeper**, **Zen Guard**, **Auto-Resume**, and **Auto-Repair**.
   * **Strict mode:** Leave it OFF for normal use. It is only for users who prefer a failed request over a direct fallback.
 
@@ -381,7 +381,7 @@ A common concern is whether rotating limits requires starting a brand-new chat. 
 
 ### 6. What to do if you get `CF_HAPPY_EYEBALLS_MITM_FAILURE`
 * **Cause:** MASQUE protocol (UDP 443) blocked by ISP or stale Anycast routing.
-* **Fix:** Click **Fix WARP (Reset Keys)** on the dashboard. The app automatically locks the tunnel into WireGuard mode, which bypasses MASQUE MITM checks.
+* **Fix:** Click **Fix WARP (Reset Keys)** on the dashboard, then either switch to **Full System TUN** (which uses WireGuard) or stay on **App Only (Isolated)** and use a clean endpoint. App-Only proxy mode cannot use WireGuard: current WARP clients reject it with `Proxy mode only supports MASQUE`.
 
 ### 7. What to do if port 42914 or 41987 is already in use
 * **Cause:** OpenCode's managed service (42914) or this proxy (41987) did not release its socket, usually after a forced shutdown.

@@ -15,7 +15,7 @@ import json
 import subprocess
 from typing import Any
 
-from ouc_common import CREATE_NO_WINDOW, find_opencode_cli
+from ouc_common import find_opencode_cli, opencode_command, run_hidden
 
 INTEGRATION = "opencode"
 EXPORT_TIMEOUT = 30.0
@@ -27,13 +27,7 @@ def _run(args: list[str], timeout: float) -> subprocess.CompletedProcess[str] | 
     if not cli:
         return None
     try:
-        return subprocess.run(
-            [cli, "auth", *args],
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            creationflags=CREATE_NO_WINDOW,
-        )
+        return run_hidden(opencode_command(cli, ["auth", *args]), timeout=timeout)
     except (OSError, subprocess.SubprocessError):
         return None
 

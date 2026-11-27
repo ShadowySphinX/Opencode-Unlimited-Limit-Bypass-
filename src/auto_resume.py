@@ -69,7 +69,7 @@ def clear_opencode_free_limit() -> int:
                     "('free-limit', 'go-upsell', 'free_usage_limit', "
                     "'usage_limit', 'quota_exceeded')"
                 )
-                deleted += cur.rowcount
+                deleted += max(0, cur.rowcount)
                 conn.commit()
             finally:
                 conn.close()
@@ -88,6 +88,9 @@ def get_latest_session_info() -> tuple[str, str, str] | None:
         return None
     try:
         conn = sqlite3.connect(str(db_path), timeout=3.0)
+    except Exception:
+        return None
+    try:
         cur = conn.cursor()
         cur.execute(
             "SELECT id, directory, title FROM session_v2 "
@@ -95,11 +98,12 @@ def get_latest_session_info() -> tuple[str, str, str] | None:
             "ORDER BY time_updated DESC LIMIT 1"
         )
         row = cur.fetchone()
-        conn.close()
         if row and row[0]:
             return str(row[0]), str(row[1] or ""), str(row[2] or "")
     except Exception:
         pass
+    finally:
+        conn.close()
     return None
 
 
@@ -112,9 +116,11 @@ def send_continue_keystroke(reload_first: bool = True) -> bool:
                 if reload_first:
                     subprocess.run(["xdotool", "search", "--onlyvisible", "--class", "opencode", "key", "--clearmodifiers", "ctrl+r"], capture_output=True, timeout=2.0)
                     time.sleep(1.2)
-                subprocess.run(["xdotool", "search", "--onlyvisible", "--class", "opencode", "type", "--clearmodifiers", "continue"], capture_output=True, timeout=2.0)
-                subprocess.run(["xdotool", "search", "--onlyvisible", "--class", "opencode", "key", "--clearmodifiers", "Return"], capture_output=True, timeout=2.0)
-                return True
+                typed = subprocess.run(["xdotool", "search", "--onlyvisible", "--class", "opencode", "type", "--clearmodifiers", "continue"], capture_output=True, timeout=2.0)
+                sent = subprocess.run(["xdotool", "search", "--onlyvisible", "--class", "opencode", "key", "--clearmodifiers", "Return"], capture_output=True, timeout=2.0)
+                # xdotool exits non-zero when no matching window exists, so a
+                # silent no-op must not be reported as a delivered keystroke.
+                return typed.returncode == 0 and sent.returncode == 0
         except Exception:
             pass
         return False

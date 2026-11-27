@@ -22,6 +22,10 @@ wo(){ "$WARP" --accept-tos "$@" 2>/dev/null && return 0; "$WARP" "$@" 2>/dev/nul
 
 IFACE=CloudflareWARP
 TICK=45
+# Hosts with IPv6 disabled cannot hold the v6 chain; requiring it in the
+# idempotence check would rebuild the rules (and briefly fail open) every tick.
+IP6_OK=1
+ip6tables -L -n >/dev/null 2>&1 || IP6_OK=0
 
 DEST="${OUC_DEST:-${XDG_DATA_HOME:-$HOME/.local/share}/opencode-unlimited}"
 PAUSE_FILE="${OUC_PAUSE_FILE:-$DEST/keeper.pause}"
@@ -43,6 +47,28 @@ proxy_ready(){
   (exec 3<>/dev/tcp/127.0.0.1/40000) 2>/dev/null
 }
 
+set_mode(){
+  # Current WARP clients only carry proxy mode over MASQUE; asking for
+  # WireGuard there fails with "Proxy mode only supports MASQUE" and leaves
+  # port 40000 dead. TUN keeps the WireGuard path.
+  if [ "$MODE" = "warp" ]; then
+    # Leave proxy mode before changing the protocol: a proxy client rejects
+    # the change while it is serving, so the order matters in this direction.
+    w mode warp
+    w tunnel protocol set "${OUC_WARP_PROTOCOL:-WireGuard}"
+  else
+    # A serving proxy client refuses a protocol change, so drop a proxy that
+    # drifted onto the wrong protocol before correcting it.
+    SETTINGS=$(wo settings 2>/dev/null || true)
+    if echo "$SETTINGS" | grep -qiE "mode[^:]*:[[:space:]]*proxy" && ! echo "$SETTINGS" | grep -qi masque; then
+      w disconnect
+    fi
+    w tunnel protocol set "${OUC_WARP_PROTOCOL:-MASQUE}"
+    w mode proxy
+    w proxy port 40000
+  fi
+}
+
 ensure_connected(){
   # 1. Already connected in the right shape: do not touch anything.
   #    A stale "Connected" with no port 40000 listener is mode drift, not health.
@@ -55,7 +81,7 @@ ensure_connected(){
 
   # 2. In-flight handshake grace window
   if wo status | head -1 | grep -qi "connecting"; then
-    for i in $(seq 1 8); do
+    for _ in $(seq 1 8); do
       sleep 1
       if wo status | head -1 | grep -q Connected; then
         if [ "$MODE" != "proxy" ] || proxy_ready; then return 0; fi
@@ -65,15 +91,10 @@ ensure_connected(){
   fi
 
   # 3. Disconnected: ensure the selected mode and connect
-  if [ "$MODE" = "warp" ]; then
-    w mode warp
-  else
-    w mode proxy
-    w proxy port 40000
-  fi
+  set_mode
   w connect
 
-  for i in $(seq 1 8); do
+  for _ in $(seq 1 8); do
     sleep 1
     if wo status | head -1 | grep -q Connected; then
       if [ "$MODE" != "proxy" ] || proxy_ready; then return 0; fi
@@ -88,20 +109,11 @@ ensure_connected(){
   fi
   LAST_REPAIR=$NOW
 
-  STATUS="$(wo status 2>/dev/null)"
-  if echo "$STATUS" | grep -qiE "mitm|happy_eyeball|unable"; then
-    w tunnel protocol set WireGuard
-  fi
   w tunnel rotate-keys
-  if [ "$MODE" = "warp" ]; then
-    w mode warp
-  else
-    w mode proxy
-    w proxy port 40000
-  fi
+  set_mode
   w connect
 
-  for i in $(seq 1 6); do
+  for _ in $(seq 1 6); do
     sleep 1
     if wo status | head -1 | grep -q Connected; then
       if [ "$MODE" != "proxy" ] || proxy_ready; then return 0; fi
@@ -112,12 +124,7 @@ ensure_connected(){
   STATUS="$(wo status 2>/dev/null)"
   if echo "$STATUS" | grep -qiE "registration missing|not registered"; then
     w registration new || return 1
-    if [ "$MODE" = "warp" ]; then
-      w mode warp
-    else
-      w mode proxy
-      w proxy port 40000
-    fi
+    set_mode
     w connect
     sleep 4
     if wo status | head -1 | grep -q Connected; then
@@ -139,7 +146,43 @@ ensure_guard(){
     return 0
   fi
 
+  SSH_PORTS="$(ss -tlnp 2>/dev/null | grep sshd | awk '{print $4}' | awk -F: '{print $NF}' | sort -u)"
+
   # ---- v4
+  # Flushing a live chain fails open until the DROP rule is back, so leave an
+  # intact chain alone instead of rebuilding it on every tick. A new SSH port
+  # still forces a rebuild so a changed sshd_config cannot lock the host out.
+  intact=1
+  iptables -C OUTPUT -j OUC_LEAKGUARD 2>/dev/null || intact=0
+  iptables -C OUC_LEAKGUARD -j DROP 2>/dev/null || intact=0
+  iptables -C OUC_LEAKGUARD -o lo -j ACCEPT 2>/dev/null || intact=0
+  iptables -C OUC_LEAKGUARD -m state --state ESTABLISHED,RELATED -j ACCEPT 2>/dev/null || intact=0
+  iptables -C OUC_LEAKGUARD -p tcp --dport 22 -j ACCEPT 2>/dev/null || intact=0
+  iptables -C OUC_LEAKGUARD -p tcp --sport 22 -j ACCEPT 2>/dev/null || intact=0
+  iptables -C OUC_LEAKGUARD -o "$IFACE" -j ACCEPT 2>/dev/null || intact=0
+  if [ "$IP6_OK" = "1" ]; then
+    ip6tables -C OUTPUT -j OUC_LEAKGUARD 2>/dev/null || intact=0
+    ip6tables -C OUC_LEAKGUARD -j DROP 2>/dev/null || intact=0
+    ip6tables -C OUC_LEAKGUARD -o lo -j ACCEPT 2>/dev/null || intact=0
+    ip6tables -C OUC_LEAKGUARD -m state --state ESTABLISHED,RELATED -j ACCEPT 2>/dev/null || intact=0
+    ip6tables -C OUC_LEAKGUARD -p tcp --dport 22 -j ACCEPT 2>/dev/null || intact=0
+    ip6tables -C OUC_LEAKGUARD -p tcp --sport 22 -j ACCEPT 2>/dev/null || intact=0
+    ip6tables -C OUC_LEAKGUARD -o "$IFACE" -j ACCEPT 2>/dev/null || intact=0
+  fi
+  if [ "$intact" = "1" ]; then
+    for p in $SSH_PORTS; do
+      if [ -n "$p" ] && [ "$p" -gt 0 ] 2>/dev/null; then
+        iptables -C OUC_LEAKGUARD -p tcp --dport "$p" -j ACCEPT 2>/dev/null || intact=0
+        iptables -C OUC_LEAKGUARD -p tcp --sport "$p" -j ACCEPT 2>/dev/null || intact=0
+        if [ "$IP6_OK" = "1" ]; then
+          ip6tables -C OUC_LEAKGUARD -p tcp --dport "$p" -j ACCEPT 2>/dev/null || intact=0
+          ip6tables -C OUC_LEAKGUARD -p tcp --sport "$p" -j ACCEPT 2>/dev/null || intact=0
+        fi
+      fi
+    done
+  fi
+  [ "$intact" = "1" ] && return 0
+
   iptables  -N OUC_LEAKGUARD 2>/dev/null
   iptables  -F OUC_LEAKGUARD
   iptables  -A OUC_LEAKGUARD -o lo              -j ACCEPT
@@ -148,7 +191,6 @@ ensure_guard(){
   # NEVER lock out SSH on port 22 or custom SSH ports
   iptables  -A OUC_LEAKGUARD -p tcp --dport 22 -j ACCEPT
   iptables  -A OUC_LEAKGUARD -p tcp --sport 22 -j ACCEPT
-  SSH_PORTS="$(ss -tlnp 2>/dev/null | grep sshd | awk '{print $4}' | awk -F: '{print $NF}' | sort -u)"
   for p in $SSH_PORTS; do
     if [ -n "$p" ] && [ "$p" -gt 0 ] 2>/dev/null && [ "$p" -ne 22 ]; then
       iptables -A OUC_LEAKGUARD -p tcp --dport "$p" -j ACCEPT
@@ -167,6 +209,9 @@ ensure_guard(){
   iptables  -C OUTPUT -j OUC_LEAKGUARD 2>/dev/null || iptables -I OUTPUT -j OUC_LEAKGUARD
 
   # ---- v6
+  if [ "$IP6_OK" != "1" ]; then
+    return 0
+  fi
   ip6tables -N OUC_LEAKGUARD 2>/dev/null
   ip6tables -F OUC_LEAKGUARD
   ip6tables -A OUC_LEAKGUARD -o lo   -j ACCEPT
@@ -187,7 +232,7 @@ ensure_guard(){
 }
 
 # on initial boot wait for network
-for i in 1 2 3 4 5 6; do
+for _ in 1 2 3 4 5 6; do
   w status >/dev/null 2>&1 && break
   sleep 10
 done

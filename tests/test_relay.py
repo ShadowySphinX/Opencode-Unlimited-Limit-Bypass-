@@ -118,6 +118,20 @@ class RelayStoreTests(unittest.TestCase):
         _, _, third = self.store.create_client(self.cfg, "b")
         self.assertNotEqual(third, old)
 
+    def test_rotation_moves_a_warpgate_client_back_to_the_prefix_lane(self) -> None:
+        client_id, _, _ = self.store.create_client(self.cfg, "a")
+        self.store.set_route(
+            client_id, "", "warpgate", '{"name":"warp-1","host":"h","port":1}'
+        )
+
+        old, new = self.store.rotate_client(self.cfg, client_id)
+
+        self.assertEqual(old, "")
+        row = self.store.client_by_id(client_id)
+        self.assertEqual(row["block"], new)
+        self.assertEqual(row["lane"], "prefix")
+        self.assertEqual(row["upstream"], "")
+
     def test_exhausted_capacity_refuses_to_rotate(self) -> None:
         cfg = blockrelay.Config(
             prefixes=["2001:db8:9::/64"],
@@ -383,6 +397,23 @@ class RelayRotationWiringTests(unittest.TestCase):
             ok, msg = proxy_chain.rotate_custom_proxy()
         self.assertFalse(ok)
         self.assertIn("outside that block", msg)
+
+    def test_a_local_exit_outside_the_reported_block_is_not_a_rotation(self) -> None:
+        with mock.patch.object(
+            proxy_chain,
+            "relay_api_request",
+            return_value={
+                "ok": True,
+                "block": "2001:db8:1:9::/64",
+                "egress_ip": "2001:db8:1:9::1",
+                "verified": True,
+            },
+        ), mock.patch.object(
+            ouc_common, "probe_proxy_egress", return_value="2001:db8:1:2::1"
+        ):
+            ok, msg = proxy_chain.rotate_custom_proxy()
+        self.assertFalse(ok)
+        self.assertIn("did not change the route", msg)
 
     def test_relay_side_probe_covers_a_cold_local_tunnel(self) -> None:
         with mock.patch.object(

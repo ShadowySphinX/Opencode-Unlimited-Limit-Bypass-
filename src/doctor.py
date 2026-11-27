@@ -2,13 +2,11 @@
 
 from __future__ import annotations
 
-import ctypes
 import json
 import shutil
 import socket
 import sys
 from datetime import datetime, timezone
-from pathlib import Path
 
 from ouc_common import (
     BIN_DIR,
@@ -26,6 +24,7 @@ from ouc_common import (
     service_proxy_wired,
     warp_status,
 )
+from ouc_common import is_mutex_held
 from ouc_firewall import is_killswitch_installed
 
 
@@ -42,14 +41,8 @@ def _bad(msg: str) -> None:
 
 
 def _is_mutex_held(name: str) -> bool:
-    kernel32 = ctypes.windll.kernel32
-    kernel32.OpenMutexW.restype = ctypes.c_void_p
-    SYNCHRONIZE = 0x00100000
-    handle = kernel32.OpenMutexW(SYNCHRONIZE, False, f"Local\\{name}")
-    if handle:
-        kernel32.CloseHandle(ctypes.c_void_p(handle))
-        return True
-    return False
+    """Same liveness check the dashboard uses, across both namespaces."""
+    return is_mutex_held(name)
 
 
 def _task_exists(task_name: str) -> bool:

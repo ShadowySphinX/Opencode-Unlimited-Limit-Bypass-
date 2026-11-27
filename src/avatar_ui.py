@@ -55,7 +55,6 @@ from ouc_common import (
     find_warp_cli,
     get_egress_ip,
     get_warp_local_v6,
-    hop_once,
     hop_report,
     is_admin,
     is_cloudflare_v6,
@@ -200,9 +199,8 @@ def _heartbeat_age(path: Path) -> float | None:
 def _probe_http(url: str, proxy: str | None, timeout: float = PROBE_TIMEOUT) -> tuple[bool, str]:
     """Make one real HTTPS request. Returns (reached, stage).
 
-    Any HTTP answer (even 403/429) proves DNS, TCP, TLS and the tunnel work;
-    only transport errors count as failures. Stage is one of: ok, proxy,
-    timeout, upstream.
+    Explicit inference overload proves reachability, unlike a generic gateway
+    failure. Stage is one of: ok, overloaded, proxy, timeout, upstream.
     """
     handlers = [urllib.request.ProxyHandler({"http": proxy, "https": proxy} if proxy else {})]
     opener = urllib.request.build_opener(*handlers)
@@ -220,9 +218,13 @@ def _probe_http(url: str, proxy: str | None, timeout: float = PROBE_TIMEOUT) -> 
         return True, "ok"
     except urllib.error.HTTPError as exc:
         try:
-            exc.close()
+            body = exc.read(4096).decode("utf-8", errors="replace")
+            if exc.code in (429, 503) and _OVERLOAD_RE.search(body):
+                return True, "overloaded"
         except Exception:
             pass
+        finally:
+            exc.close()
         return (False, "upstream") if exc.code in (407, 502, 503, 504) else (True, "ok")
     except Exception as exc:
         text = str(getattr(exc, "reason", exc)).lower()
@@ -260,9 +262,10 @@ _NET_ERROR_RE = re.compile(
     re.IGNORECASE,
 )
 _UPSTREAM_503_RE = re.compile(
-    r"AI_APICallError|statusCode[=:\s]+503|Request failed with status 503",
+    r"statusCode[=:\s]+503|Request failed with status 503",
     re.IGNORECASE,
 )
+_OVERLOAD_RE = re.compile(r"inference service is overloaded", re.IGNORECASE)
 _LOG_TS_RE = re.compile(r"^timestamp=(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})")
 
 
@@ -272,10 +275,22 @@ def _recent_network_errors(lines: list[str], max_age: float = 600.0) -> list[str
     OpenCode's own ``http.status=503`` replies are not upstream failures, so
     the match list is limited to transport errors and provider 503s.
     """
+    return _recent_matching_errors(
+        [line for line in lines if not _OVERLOAD_RE.search(line)],
+        re.compile(f"{_NET_ERROR_RE.pattern}|{_UPSTREAM_503_RE.pattern}", re.IGNORECASE),
+        max_age,
+    )
+
+
+def _recent_overload_errors(lines: list[str], max_age: float = 600.0) -> list[str]:
+    return _recent_matching_errors(lines, _OVERLOAD_RE, max_age)
+
+
+def _recent_matching_errors(lines: list[str], pattern: re.Pattern, max_age: float) -> list[str]:
     cutoff = time.time() - max_age
     found: list[str] = []
     for line in lines:
-        if not (_NET_ERROR_RE.search(line) or _UPSTREAM_503_RE.search(line)):
+        if not pattern.search(line):
             continue
         stamp = _LOG_TS_RE.match(line)
         if not stamp:
@@ -328,18 +343,25 @@ def _find_pythonw() -> str | None:
     return None
 
 
+def _is_ascii(text: str) -> bool:
+    try:
+        text.encode("ascii")
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
 def _write_cmd_wrapper(path: Path, content: str) -> None:
     """Write a .cmd shim, switching to UTF-8 when a path holds non-ASCII text.
 
-    cmd.exe reads batch files in the active console code page, so a UTF-8 shim
-    needs ``chcp 65001`` before the first non-ASCII line. ASCII shims keep the
-    plain fast path and leave the console code page alone.
+    cmd.exe reads batch files in the active console code page, so a shim whose
+    content or install path holds non-ASCII text needs ``chcp 65001`` before the
+    first non-ASCII line. ASCII shims keep the plain fast path and leave the
+    console code page alone.
     """
-    try:
+    if _is_ascii(content) and _is_ascii(str(path)):
         path.write_bytes(content.encode("ascii"))
         return
-    except UnicodeEncodeError:
-        pass
 
     lines = content.split("\r\n")
     if lines and lines[0].lower().startswith("@echo off"):
@@ -694,7 +716,7 @@ class AvatarControlApi:
                 else:
                     reached, stage = _probe_http(PROBE_URL, proxy)
                     if reached:
-                        code = "ok"
+                        code = stage
                     else:
                         direct_ok, _ = _probe_http(PROBE_DIRECT_URL, None, timeout=5.0)
                         code = stage if direct_ok else "offline"
@@ -703,7 +725,7 @@ class AvatarControlApi:
             finally:
                 with self._probe_lock:
                     self._probe = {
-                        "ok": code == "ok",
+                        "ok": code in ("ok", "overloaded"),
                         "code": code,
                         "ms": int((time.time() - started) * 1000),
                         "ts": int(time.time()),
@@ -873,6 +895,7 @@ class AvatarControlApi:
             path_wired=state["lane"]["path_wired"],
             proxy=proxy,
             net_errors=recent_errors,
+            overload_errors=_recent_overload_errors(opencode_lines),
         )
         return state
 
@@ -898,6 +921,7 @@ class AvatarControlApi:
         path_wired: bool = False,
         proxy: dict | None = None,
         net_errors: list[str] | None = None,
+        overload_errors: list[str] | None = None,
     ) -> dict:
         """Summarise the live state as a short list of plain-language problems with one-click fixes."""
         issues: list[dict] = []
@@ -984,6 +1008,13 @@ class AvatarControlApi:
             )
 
         code = (probe or {}).get("code", "")
+        if overload_errors or code == "overloaded":
+            add(
+                "warn",
+                "The inference provider reports overload",
+                "Allow OpenCode's existing retry to finish, retry later, or select another model/provider. "
+                "Rotating WARP or repairing the route does not increase provider capacity.",
+            )
         fallback_active = bool(proxy.get("fallback_active"))
         if proxy_listening and fallback_active:
             route = {
@@ -1302,11 +1333,6 @@ class AvatarControlApi:
         if warp and changed:
             if not warp_registration_healthy(warp):
                 repair_warp_registration(warp, 3)
-            try:
-                from ouc_common import ensure_warp_protocol
-                ensure_warp_protocol("wireguard", warp_bin=warp)
-            except Exception:
-                pass
             ensure_warp_mode(warp, clean_scope)
             run_warp(["connect"], warp_bin=warp)
             connected = False
@@ -1352,11 +1378,6 @@ class AvatarControlApi:
                 scope = current.get("warp_scope", default_scope)
                 if not warp_registration_healthy(warp):
                     repair_warp_registration(warp, 3)
-                try:
-                    from ouc_common import ensure_warp_protocol
-                    ensure_warp_protocol("wireguard", warp_bin=warp)
-                except Exception:
-                    pass
                 ensure_warp_mode(warp, scope)
                 run_warp(["connect"], warp_bin=warp)
                 connected = False
@@ -1822,12 +1843,6 @@ class AvatarControlApi:
             try:
                 from proxy_chain import get_egress_config
                 scope = get_egress_config().get("warp_scope", default_scope)
-            except Exception:
-                pass
-
-            try:
-                from ouc_common import ensure_warp_protocol
-                ensure_warp_protocol("wireguard", warp_bin=wb)
             except Exception:
                 pass
 

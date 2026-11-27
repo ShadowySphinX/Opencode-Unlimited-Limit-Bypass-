@@ -26,6 +26,26 @@ MODE="${OUC_WARP_MODE:-proxy}"
 w(){  sudo -n "$WARP" --accept-tos "$@" >/dev/null 2>&1 && return 0; sudo -n "$WARP" "$@" >/dev/null 2>&1; }
 wo(){ sudo -n "$WARP" --accept-tos "$@" 2>/dev/null && return 0; sudo -n "$WARP" "$@" 2>/dev/null; }
 
+set_mode(){
+  # Proxy mode is MASQUE-only on current WARP clients; TUN uses WireGuard.
+  if [ "$MODE" = "warp" ]; then
+    # Leave proxy mode before changing the protocol: a proxy client rejects
+    # the change while it is serving, so the order matters in this direction.
+    w mode warp
+    w tunnel protocol set "${OUC_WARP_PROTOCOL:-WireGuard}"
+  else
+    # A serving proxy client refuses a protocol change, so drop a proxy that
+    # drifted onto the wrong protocol before correcting it.
+    SETTINGS=$(wo settings 2>/dev/null || true)
+    if echo "$SETTINGS" | grep -qiE "mode[^:]*:[[:space:]]*proxy" && ! echo "$SETTINGS" | grep -qi masque; then
+      w disconnect
+    fi
+    w tunnel protocol set "${OUC_WARP_PROTOCOL:-MASQUE}"
+    w mode proxy
+    w proxy port 40000
+  fi
+}
+
 restore(){
   rm -f "$PAUSE_FILE" 2>/dev/null || true
   sudo -n systemctl start "$KEEPER" >/dev/null 2>&1 || true
@@ -58,7 +78,14 @@ cur_v6(){
   echo ""
 }
 
-m64(){ echo "$1" | cut -d: -f1-4; }
+m64(){ python3 - "$1" <<'PY' 2>/dev/null
+import ipaddress, sys
+try:
+    print(ipaddress.IPv6Network((ipaddress.IPv6Address(sys.argv[1]), 64), strict=False).network_address)
+except Exception:
+    print("")
+PY
+}
 
 OLD_V6=$(cur_v6)
 echo "old /64: ${OLD_V6:-?}"
@@ -77,12 +104,7 @@ if ! wo registration show >/dev/null 2>&1; then
 fi
 
 w tunnel rotate-keys
-if [ "$MODE" = "warp" ]; then
-  w mode warp
-else
-  w mode proxy
-  w proxy port 40000
-fi
+set_mode
 w connect
 
 NEW_V6=""

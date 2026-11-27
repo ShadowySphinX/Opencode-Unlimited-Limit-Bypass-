@@ -465,8 +465,10 @@ def apply_copy() -> tuple[bool, str]:
             archive_bytes = asar.stat().st_size
             data_bytes = archive_bytes - start
             # The header of an untouched install is what `restore` puts back. A
-            # patched archive never overwrites it with its own header.
-            if not already or not HEADER_COPY.is_file():
+            # patched archive never overwrites it with its own header; without
+            # the original header a byte-exact restore is impossible, and
+            # recording the patched one would silently keep the copy in place.
+            if not already:
                 handle.seek(0)
                 prelude = handle.read(start)
                 if len(prelude) != start:
@@ -481,6 +483,17 @@ def apply_copy() -> tuple[bool, str]:
                     "baseline_bytes": archive_bytes,
                     "labels": [],
                 }
+
+        # Read the sentinel before the header is mutated; afterwards its offset
+        # points into the appended copies and would no longer describe the
+        # original archive.
+        try:
+            with asar.open("rb") as original:
+                sentinel = _entry_bytes(
+                    original, start, _node_at(header, ("package.json",))
+                )
+        except KeyError:
+            sentinel = None
 
         # Point the changed entries at copies appended after the data section.
         # Only offsets move, so an entry that is not patched keeps reading its
@@ -509,14 +522,12 @@ def apply_copy() -> tuple[bool, str]:
             for path, data in changes.items():
                 if _entry_bytes(check, new_start, _node_at(new_header, path)) != data:
                     raise ValueError(f"{'/'.join(path)} did not read back")
-            try:
-                with asar.open("rb") as original:
-                    before = _entry_bytes(original, start, _node_at(header, ("package.json",)))
-                after = _entry_bytes(check, new_start, _node_at(new_header, ("package.json",)))
-                if before != after:
+            if sentinel is not None:
+                after = _entry_bytes(
+                    check, new_start, _node_at(new_header, ("package.json",))
+                )
+                if sentinel != after:
                     raise ValueError("an entry that was not patched moved")
-            except KeyError:
-                pass
         if temp.stat().st_size != new_start + data_bytes + added:
             raise ValueError("the archive came out the wrong size")
 

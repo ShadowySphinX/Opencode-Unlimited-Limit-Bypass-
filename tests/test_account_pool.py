@@ -34,6 +34,51 @@ EXPORT = [
 
 
 class AccountListTests(unittest.TestCase):
+    def test_the_cli_runs_through_the_cross_platform_helper(self) -> None:
+        # The old path passed creationflags directly, which raises ValueError on
+        # Linux and turned every wall into "guard error" instead of a switch.
+        completed = mock.Mock(returncode=0, stdout="[]")
+
+        with mock.patch.object(
+            account_pool, "find_opencode_cli", return_value="/usr/bin/opencode"
+        ), mock.patch.object(
+            account_pool, "run_hidden", return_value=completed
+        ) as run:
+            result = account_pool._run(["export"], 5.0)
+
+        self.assertIs(result, completed)
+        run.assert_called_once_with(
+            ["/usr/bin/opencode", "auth", "export"], timeout=5.0
+        )
+
+    def test_a_cmd_shim_is_run_through_cmd_exe(self) -> None:
+        completed = mock.Mock(returncode=0, stdout="[]")
+        shim = r"C:\Users\user\AppData\Roaming\npm\opencode.cmd"
+
+        with mock.patch.object(
+            account_pool, "find_opencode_cli", return_value=shim
+        ), mock.patch.object(
+            account_pool, "run_hidden", return_value=completed
+        ) as run:
+            account_pool._run(["switch", "opencode", "cred_b"], 5.0)
+
+        command = run.call_args.args[0]
+        self.assertEqual(command[:2], ["cmd.exe", "/c"])
+        self.assertEqual(command[2], shim)
+        self.assertEqual(command[3:], ["auth", "switch", "opencode", "cred_b"])
+
+    def test_a_missing_cli_is_not_an_error(self) -> None:
+        with mock.patch.object(account_pool, "find_opencode_cli", return_value=None):
+            self.assertIsNone(account_pool._run(["export"], 5.0))
+
+    def test_a_spawn_failure_is_not_an_error(self) -> None:
+        with mock.patch.object(
+            account_pool, "find_opencode_cli", return_value="/usr/bin/opencode"
+        ), mock.patch.object(
+            account_pool, "run_hidden", side_effect=OSError("boom")
+        ):
+            self.assertIsNone(account_pool._run(["export"], 5.0))
+
     def test_only_gateway_accounts_are_listed(self) -> None:
         proc = mock.Mock(returncode=0, stdout=json.dumps(EXPORT))
 
@@ -155,6 +200,20 @@ class GuardAccountSwitchTests(unittest.TestCase):
                 mock.patch.object(zen_guard, "_dispatch_auto_resume"):
             state["accounts_burned"] = {"cred_b": zen_guard._utc_day() - 1}
             self.assertTrue(zen_guard._switch_account(state, self.now))
+
+    def test_corrupt_burn_state_does_not_stop_the_switch(self) -> None:
+        state = self.state(accounts_burned={"cred_b": "yesterday-ish", "junk": None})
+        accounts = [
+            {"id": "cred_a", "label": "Personal", "active": True},
+            {"id": "cred_b", "label": "Work", "active": False},
+        ]
+
+        with mock.patch.object(zen_guard.account_pool, "accounts", return_value=accounts), \
+                mock.patch.object(zen_guard.account_pool, "switch", return_value=True) as switch, \
+                mock.patch.object(zen_guard, "_dispatch_auto_resume"):
+            self.assertTrue(zen_guard._switch_account(state, self.now))
+
+        switch.assert_called_once_with("cred_b")
 
     def test_one_account_is_not_a_pool(self) -> None:
         state = self.state()

@@ -16,7 +16,6 @@ from ouc_common import (
     append_log,
     ensure_dirs,
     ensure_warp_mode,
-    ensure_warp_protocol,
     find_warp_cli,
     is_admin,
     is_keeper_paused,
@@ -30,6 +29,7 @@ from zen_proxy import start_proxy_server
 
 TICK_SECONDS = 45
 REPAIR_COOLDOWN_SECONDS = 120.0
+WARP_PROXY_PORT = 40000
 PROXY_WATCH_SECONDS = 3.0
 # A tunnel that cannot connect on one tick may still be mid-reconnect on the
 # next, so the hand-over needs a second bad tick before it acts.
@@ -104,8 +104,9 @@ def _wait_connected(warp_bin: str, attempts: int = 10) -> bool:
 
 
 def _connect(warp_bin: str, scope: str) -> bool:
+    # ensure_warp_mode also applies the protocol the scope needs, so an app-only
+    # reconnect stays on MASQUE instead of being pushed back to WireGuard.
     ensure_warp_mode(warp_bin, scope)
-    ensure_warp_protocol("wireguard", warp_bin=warp_bin)
     run_warp(["connect"], warp_bin=warp_bin, timeout=12.0)
     return _wait_connected(warp_bin)
 
@@ -132,7 +133,12 @@ def ensure_connected(warp_bin: str | None = None) -> bool:
     connected, _mode, raw = warp_status(warp_bin=warp_bin, force=True)
     if connected:
         current_mode = warp_mode(warp_bin=warp_bin)
-        if not current_mode or current_mode == desired_mode:
+        if current_mode == desired_mode or (
+            # An unreadable mode is only healthy when the port the scope needs
+            # is actually listening; otherwise the tunnel is drift too.
+            not current_mode
+            and (desired_mode != "proxy" or _port_open(WARP_PROXY_PORT))
+        ):
             return True
         # The selected scope changed while the tunnel stayed up. Apply the
         # mode before returning so the isolated proxy port is actually bound.

@@ -13,7 +13,6 @@ UNIT_KEEPER="/etc/systemd/system/${BRAND}-keeper.service"
 UNIT_GUARD="$HOME/.config/systemd/user/${BRAND}-guard.service"
 SHIM="$BIN_DIR/opencode"
 SUDOERS_FILE="/etc/sudoers.d/$BRAND"
-REPO="https://github.com/ShadowySphinX/Opencode-Unlimited-Limit-Bypass-"
 RAW="https://raw.githubusercontent.com/ShadowySphinX/Opencode-Unlimited-Limit-Bypass-/main"
 
 say(){ echo -e "  $*"; }
@@ -222,22 +221,21 @@ if ! swo registration show >/dev/null 2>&1; then
 fi
 
 # Detect VPS or SSH session to protect remote connectivity
-IS_VPS=0
 if [ -n "${SSH_CLIENT:-}" ] || [ -n "${SSH_TTY:-}" ] || [ -n "${SSH_CONNECTION:-}" ] || [ -f /etc/cloud/cloud.cfg ] || [ -d /var/lib/cloud ]; then
-  IS_VPS=1
   touch "$DEST/vps.flag" 2>/dev/null || true
   sudo touch /etc/opencode-unlimited-vps.flag 2>/dev/null || true
   say "VPS / SSH environment detected: enforcing isolated proxy mode (port 40000) to protect SSH access"
 fi
 
-# Use WireGuard so ISPs that throttle MASQUE/UDP 443 do not break the tunnel.
-sw tunnel protocol set WireGuard >/dev/null 2>&1 || true
+# Proxy mode only carries MASQUE on current WARP clients; WireGuard there fails
+# with "Proxy mode only supports MASQUE" and leaves port 40000 dead.
+sw tunnel protocol set "${OUC_WARP_PROTOCOL:-MASQUE}" >/dev/null 2>&1 || true
 
 sw mode proxy
 sw proxy port 40000
 sw connect
 CONNECTED=0
-for i in $(seq 1 10); do
+for _ in $(seq 1 10); do
   sleep 3
   swo status | head -1 | grep -q Connected && { CONNECTED=1; break; }
 done
@@ -334,7 +332,6 @@ fi
 if [ "$WARP_STATUS" = "on" ] || [ "$WARP_STATUS" = "plus" ]; then
   ok "egress is cloudflare (warp verified): $V6"
 elif [ -n "$V6" ]; then
-  FIRST=$(echo "$V6" | cut -d: -f1-4)
   case "$V6" in
     2606:*|2a09:*|104.28.*|8.29.*) ok "egress is cloudflare (warp): $V6" ;;
     *) bad "egress is not Cloudflare WARP yet - the keeper will retry; run ${BRAND}-doctor if it persists" ;;

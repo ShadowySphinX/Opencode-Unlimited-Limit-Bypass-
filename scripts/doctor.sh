@@ -14,7 +14,7 @@ if [ -z "$WARP" ]; then
   elif [ -x "$HOME/.local/bin/warp-cli" ]; then WARP="$HOME/.local/bin/warp-cli"
   fi
 fi
-wo(){ sudo -n "$WARP" --accept-tos "$@" 2>/dev/null && return 0; sudo -n "$WARP" "$@" 2>/dev/null; }
+wo(){ [ -n "$WARP" ] || return 1; sudo -n "$WARP" --accept-tos "$@" 2>/dev/null && return 0; sudo -n "$WARP" "$@" 2>/dev/null; }
 
 ok(){ echo -e "  \e[32m✓\e[0m $*"; }
 warn(){ echo -e "  \e[33m!\e[0m $*"; }
@@ -45,7 +45,7 @@ echo "$ST" | grep -q Connected \
 IS_PROXY=0
 if [ -f /etc/opencode-unlimited-vps.flag ] || [ -f "$DEST/vps.flag" ]; then
   IS_PROXY=1
-elif wo settings 2>/dev/null | grep -qi "proxy"; then
+elif wo settings 2>/dev/null | grep -qiE "mode[^:]*:[[:space:]]*proxy"; then
   IS_PROXY=1
 elif wo mode 2>/dev/null | grep -qi "proxy"; then
   IS_PROXY=1
@@ -100,7 +100,6 @@ fi
 if [ "$WARP_STATUS" = "on" ] || [ "$WARP_STATUS" = "plus" ]; then
   ok "egress is cloudflare (warp verified): $V6"
 elif [ -n "$V6" ]; then
-  FIRST=$(echo "$V6" | cut -d: -f1-4)
   case "$V6" in
     2606:*|2a09:*|104.28.*|8.29.*) ok "egress is cloudflare (warp): $V6" ;;
     *) bad "egress is not Cloudflare WARP ($V6) - restart the keeper service" ;;

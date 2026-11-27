@@ -8,6 +8,7 @@ import sys
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Callable
 
 # Ensure local script and bundled directories are resolvable
 _HERE = Path(__file__).resolve().parent
@@ -66,15 +67,14 @@ STUCK_LOOKBACK = 12 * 3600
 STUCK_RETRY_SECONDS = 15 * 60
 OPENCODE_DB_FILE = Path.home() / ".local" / "share" / "opencode" / "opencode.db"
 # Reconnecting WARP tears the tunnel adapter down, which resets every live
-# socket. A rotation therefore waits for a quiet window: no OpenCode log writes
-# for this long means no request is mid-stream. The wait is capped so a busy
-# session cannot block rotation forever.
+# socket. A rotation therefore waits for a quiet window: no bytes relayed and
+# no OpenCode log writes for this long means no request is mid-stream. The wait
+# is capped so a busy session cannot block rotation forever.
 QUIET_SECONDS = 45
 QUIET_MAX_WAIT = 180
-# The local proxy publishes its live tunnel count, but only when a tunnel
-# opens or closes: an address held open for minutes keeps its original stamp.
-# The snapshot therefore stays trusted for longer than the rotation wait it
-# feeds, and a restarted proxy republishes zero on start.
+# A proxy from before byte tracking publishes only its live tunnel count, and
+# only when a tunnel opens or closes. That snapshot stays trusted for longer
+# than the rotation wait it feeds, and a restarted proxy republishes zero.
 TUNNEL_STATUS_MAX_AGE = QUIET_MAX_WAIT + 60
 
 
@@ -125,12 +125,17 @@ def _load_state() -> dict:
             return {**_default_state(), **data}
     except Exception:
         pass
-    return _default_state()
+    # A truncated or hand-edited state file must not replay the whole log: the
+    # walls it holds were already handled before the write was lost.
+    offset = OPENCODE_LOG_FILE.stat().st_size if OPENCODE_LOG_FILE.is_file() else 0
+    return _default_state(offset)
 
 
 def _save_state(state: dict) -> None:
     try:
-        GUARD_STATE_FILE.write_text(json.dumps(state), encoding="utf-8")
+        tmp = GUARD_STATE_FILE.with_name(GUARD_STATE_FILE.name + ".tmp")
+        tmp.write_text(json.dumps(state), encoding="utf-8")
+        os.replace(tmp, GUARD_STATE_FILE)
     except Exception:
         pass
 
@@ -171,6 +176,7 @@ def _dispatch_auto_resume(state: dict) -> None:
         clear_opencode_free_limit()
 
         sids = _resumable(state)
+        ok = False
         if is_auto_resume_enabled():
             time.sleep(1.5)
             ok, res_msg = resume_active_session(sids or None)
@@ -183,8 +189,12 @@ def _dispatch_auto_resume(state: dict) -> None:
             )
         now = time.time()
         for sid in sids:
+            # Remember the attempt even when nothing was sent, so a missing
+            # window is retried after the retry window instead of every poll;
+            # the chat stays pending until a 'continue' actually goes out.
             state.setdefault("resumed", {})[sid] = now
-            (state.get("pending") or {}).pop(sid, None)
+            if ok:
+                (state.get("pending") or {}).pop(sid, None)
         _prune(state)
         _save_state(state)
     except Exception as exc:
@@ -221,11 +231,15 @@ def _sessions_stuck_on_wall(now: float | None = None) -> list[str]:
         ).fetchall()
         for (session_id,) in rows:
             newest = con.execute(
-                "SELECT json_extract(data, '$.finish') FROM session_message "
+                "SELECT json_extract(data, '$.finish'), data FROM session_message "
                 "WHERE session_id = ? ORDER BY time_created DESC LIMIT 1",
                 (session_id,),
             ).fetchone()
-            if newest and newest[0] == "error":
+            if (
+                newest
+                and newest[0] == "error"
+                and "FreeUsageLimitError" in str(newest[1] or "")
+            ):
                 stuck.append(str(session_id))
     except Exception:
         return []
@@ -277,16 +291,23 @@ def _switch_account(state: dict, now: int) -> bool:
     if len(accounts) < 2:
         return False
     today = _utc_day()
-    burned = state.get("accounts_burned")
-    if not isinstance(burned, dict):
-        burned = {}
-    burned = {key: value for key, value in burned.items() if int(value or 0) >= today}
+    raw_burned = state.get("accounts_burned")
+    burned: dict[str, int] = {}
+    if isinstance(raw_burned, dict):
+        # A hand-edited or half-written state must not stop the guard loop.
+        for key, value in raw_burned.items():
+            try:
+                stamp = int(value or 0)
+            except (TypeError, ValueError):
+                continue
+            if stamp >= today:
+                burned[str(key)] = stamp
     state["accounts_burned"] = burned
     active = next((item for item in accounts if item.get("active")), None)
     fresh = [
         item
         for item in accounts
-        if not item.get("active") and int(burned.get(str(item["id"]), 0) or 0) < today
+        if not item.get("active") and burned.get(str(item["id"]), 0) < today
     ]
     if not fresh:
         if active:
@@ -308,10 +329,15 @@ def _switch_account(state: dict, now: int) -> bool:
         state[key] = 0
     state["last_ok_hop"] = now
     state["hop_counted"] = now
-    if int(state.get("account_switch_day", 0) or 0) != today:
+    try:
+        switch_day = int(state.get("account_switch_day", 0) or 0)
+        switches = int(state.get("account_switches", 0) or 0)
+    except (TypeError, ValueError):
+        switch_day, switches = 0, 0
+    if switch_day != today:
         state["account_switch_day"] = today
-        state["account_switches"] = 0
-    state["account_switches"] = int(state.get("account_switches", 0) or 0) + 1
+        switches = 0
+    state["account_switches"] = switches + 1
     _save_state(state)
     append_log(
         GUARD_LOG_FILE,
@@ -363,14 +389,17 @@ def _pause_left(state: dict, now: int) -> int:
     return until - now
 
 
-def _proxy_has_tunnels(now: float) -> bool:
-    """True while the local proxy reports an open upstream tunnel."""
+def _proxy_status() -> dict:
+    """The local proxy's published status, or an empty dict when unreadable."""
     try:
         data = json.loads((LANE_DIR / "proxy_status.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        return False
-    if not isinstance(data, dict):
-        return False
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _proxy_has_tunnels(data: dict, now: float) -> bool:
+    """True while the local proxy reports an open upstream tunnel."""
     try:
         count = int(data.get("active_tunnels", 0) or 0)
         stamp = float(data.get("active_tunnels_ts", 0) or 0)
@@ -379,16 +408,36 @@ def _proxy_has_tunnels(now: float) -> bool:
     return count > 0 and now - stamp <= TUNNEL_STATUS_MAX_AGE
 
 
+def _proxy_moved_bytes(data: dict, now: float) -> bool:
+    """True while the proxy relayed bytes within the quiet window.
+
+    An open tunnel is not proof of work: OpenCode keeps idle keep-alive
+    sockets, and one of those used to hold every rotation back for the whole
+    cap. The proxy stamps the last byte it relayed, so a tunnel only counts as
+    live while data is actually moving.
+    """
+    try:
+        stamp = float(data.get("last_byte_ts", 0) or 0)
+    except (TypeError, ValueError):
+        return False
+    return stamp > 0 and now - stamp < QUIET_SECONDS
+
+
 def _work_is_live(now: float | None = None) -> bool:
     """True while a response may be streaming.
 
     A long stream writes its log line when it starts and when it finishes, so
-    the log's mtime says nothing about the middle of one. The proxy's live
-    tunnel count is the direct signal; the recent log write also covers the
-    moment before the proxy accepts the CONNECT.
+    the log's mtime says nothing about the middle of one. The proxy's last byte
+    stamp is the direct signal; the recent log write also covers the moment
+    before the proxy accepts the CONNECT. A proxy from before byte tracking
+    publishes no stamp, and its tunnel count is all that can be trusted there.
     """
     now = time.time() if now is None else now
-    if _proxy_has_tunnels(now):
+    status = _proxy_status()
+    if "last_byte_ts" in status:
+        if _proxy_moved_bytes(status, now):
+            return True
+    elif _proxy_has_tunnels(status, now):
         return True
     try:
         age = now - OPENCODE_LOG_FILE.stat().st_mtime
@@ -625,6 +674,7 @@ def _read_new_log_bytes(state: dict) -> tuple[bool, list[str]]:
                 "quota exceeded",
                 "quota_exceeded",
                 "free usage limit",
+                "freeusagelimiterror",
                 "free usage exceeded",
                 "free-tier usage limit",
                 "usage limit reached",
@@ -643,15 +693,18 @@ def _read_new_log_bytes(state: dict) -> tuple[bool, list[str]]:
             )
             if any(p in chunk_lower for p in wall_patterns):
                 wall = True
+                sid_reader: Callable[[str], str] | None = None
                 try:
                     from auto_resume import session_id_in
+
+                    sid_reader = session_id_in
                 except Exception:
-                    session_id_in = None
-                if session_id_in:
+                    pass
+                if sid_reader is not None:
                     for line in chunk.splitlines():
                         low = line.lower()
                         if any(p in low for p in wall_patterns):
-                            sid = session_id_in(line)
+                            sid = sid_reader(line)
                             if sid and sid not in sessions:
                                 sessions.append(sid)
         except OSError:
@@ -661,7 +714,7 @@ def _read_new_log_bytes(state: dict) -> tuple[bool, list[str]]:
     if wall:
         state["wall_pending"] = True
         state["wall_seen"] = int(time.time())
-        if "free usage limit" in chunk_lower:
+        if "free usage limit" in chunk_lower or "freeusagelimiterror" in chunk_lower:
             state["last_free_wall"] = state["wall_seen"]
     _save_state(state)
     return wall, sessions

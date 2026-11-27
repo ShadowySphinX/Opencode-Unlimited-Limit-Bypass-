@@ -66,6 +66,13 @@ _STREAM_RESET_LOCK = threading.Lock()
 _LAST_STREAM_RESET_NOTE = 0.0
 _TUNNEL_LOCK = threading.Lock()
 _ACTIVE_TUNNELS = 0
+_BYTE_LOCK = threading.Lock()
+_LAST_BYTE_TS = 0.0
+_LAST_BYTE_PUBLISH = 0.0
+# A stream relays chunks continuously, so the guard only needs a stamp that is
+# a few seconds old. Rewriting the status file on every chunk would put a disk
+# write in the middle of the data path.
+BYTE_PUBLISH_INTERVAL = 2.0
 
 # Kinds that describe a failed route rather than a lifecycle note.
 ERROR_KINDS = {
@@ -175,16 +182,40 @@ def _active_tunnels() -> int:
         return _ACTIVE_TUNNELS
 
 
+def _last_byte_ts() -> float:
+    with _BYTE_LOCK:
+        return _LAST_BYTE_TS
+
+
 def _publish_tunnel_count() -> None:
-    """Mirror the live tunnel count into proxy_status for the guard and dashboard."""
+    """Mirror the tunnel count and byte activity into proxy_status.
+
+    The guard uses these fields to tell a streaming response from an idle
+    socket, so the last byte has to be published alongside the count.
+    """
     try:
         with STATUS_LOCK:
             data = _read_proxy_status()
             data["active_tunnels"] = _active_tunnels()
             data["active_tunnels_ts"] = int(time.time())
+            data["last_byte_ts"] = int(_last_byte_ts())
             _write_proxy_status(data)
     except Exception:
         pass
+
+
+def _note_tunnel_bytes() -> None:
+    """Record that a tunnel relayed bytes, throttled to one status write per interval."""
+    global _LAST_BYTE_TS, _LAST_BYTE_PUBLISH
+    now = time.time()
+    publish = False
+    with _BYTE_LOCK:
+        _LAST_BYTE_TS = now
+        if now - _LAST_BYTE_PUBLISH >= BYTE_PUBLISH_INTERVAL:
+            _LAST_BYTE_PUBLISH = now
+            publish = True
+    if publish:
+        _publish_tunnel_count()
 
 
 def _enter_tunnel() -> None:
@@ -199,6 +230,16 @@ def _leave_tunnel() -> None:
     with _TUNNEL_LOCK:
         _ACTIVE_TUNNELS = max(0, _ACTIVE_TUNNELS - 1)
     _publish_tunnel_count()
+
+
+def _reset_tunnel_activity() -> None:
+    """Drop the counters a previous server left behind in this process."""
+    global _ACTIVE_TUNNELS, _LAST_BYTE_TS, _LAST_BYTE_PUBLISH
+    with _TUNNEL_LOCK:
+        _ACTIVE_TUNNELS = 0
+    with _BYTE_LOCK:
+        _LAST_BYTE_TS = 0.0
+        _LAST_BYTE_PUBLISH = 0.0
 
 
 def _clear_fallback() -> None:
@@ -482,8 +523,8 @@ def _relay(
 ) -> None:
     """Bidirectionally forward bytes between two sockets with TCP keepalive and resilient streaming."""
     sockets = [a, b]
-    closed = set()
-    seen_data = set()
+    closed: set[socket.socket] = set()
+    seen_data: set[socket.socket] = set()
     for s in (a, b):
         try:
             s.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
@@ -555,6 +596,7 @@ def _relay(
                     seen_data.add(src)
                     try:
                         dst.sendall(data)
+                        _note_tunnel_bytes()
                     except (OSError, ConnectionResetError) as exc:
                         # A failed write toward the client means the client went
                         # away; only a write toward the upstream host says
@@ -731,7 +773,7 @@ def _open_warp_direct(
         try:
             infos = socket.getaddrinfo(clean_host, port, socket.AF_INET6, socket.SOCK_STREAM)
             if infos:
-                return _open_pinned_v6(infos[0][4][0], port, local_v6)
+                return _open_pinned_v6(str(infos[0][4][0]), port, local_v6)
         except Exception:
             pass
 
@@ -775,13 +817,13 @@ def _open_warp_direct(
 
     # Direct standard dual-stack connection (IPv4/IPv6). This silently leaves
     # the WARP IPv6 route, so record it instead of changing the route unseen.
+    sock = socket.create_connection((clean_host, port), timeout=8.0)
+    sock.settimeout(None)
     if is_opencode_host:
         _mark_fallback(
             clean_host,
             f"pinned IPv6 edge unavailable; OpenCode used the fallback route ({scope})",
         )
-    sock = socket.create_connection((clean_host, port), timeout=8.0)
-    sock.settimeout(None)
     return sock
 
 
@@ -831,7 +873,6 @@ def _repair_warp_tunnel(warp_state: _WarpState) -> bool:
     try:
         from ouc_common import (
             ensure_warp_mode,
-            ensure_warp_protocol,
             find_warp_cli,
             repair_warp_registration,
             run_warp,
@@ -844,10 +885,6 @@ def _repair_warp_tunnel(warp_state: _WarpState) -> bool:
         if not warp_registration_healthy(warp_bin):
             if not repair_warp_registration(warp_bin, 2):
                 return False
-        try:
-            ensure_warp_protocol("wireguard", warp_bin=warp_bin)
-        except Exception:
-            pass
         ensure_warp_mode(warp_bin, scope)
         run_warp(["connect"], warp_bin=warp_bin, timeout=12.0)
         for _ in range(8):
@@ -885,7 +922,7 @@ def _open_upstream(
         if cfg.get("mode") in ("tor", "custom"):
             try:
                 return open_multi_egress_upstream(
-                    host,
+                    clean_host,
                     port,
                     lambda h, p: _open_warp_direct(h, p, warp_state),
                 )
@@ -1013,6 +1050,8 @@ def _make_handler(warp_state: _WarpState):
                     except ValueError:
                         self._send_err(400, "Bad Request")
                         return
+                if host.startswith("[") and host.endswith("]"):
+                    host = host[1:-1]
                 try:
                     upstream = _connect_upstream(host, port, warp_state)
                 except Exception as exc:
@@ -1053,6 +1092,14 @@ def _make_handler(warp_state: _WarpState):
             if parsed.query:
                 path = f"{path}?{parsed.query}"
 
+            # A client waiting for "100 Continue" will not send the body until
+            # the upstream answers, so pre-reading it here would deadlock. The
+            # relay pump forwards it once the upstream asks.
+            expects_continue = any(
+                line.lower().startswith(b"expect:") and b"100-continue" in line.lower()
+                for line in headers
+            )
+
             try:
                 upstream = _connect_upstream(host, port, warp_state)
             except Exception as exc:
@@ -1078,7 +1125,7 @@ def _make_handler(warp_state: _WarpState):
                 for h in headers:
                     upstream.sendall(h)
                 upstream.sendall(b"\r\n")
-                if content_len > 0:
+                if content_len > 0 and not expects_continue:
                     body = _read_exact(self.rfile, content_len)
                     if body:
                         upstream.sendall(body)
@@ -1140,8 +1187,10 @@ def start_proxy_server(port: int = 0) -> tuple[_ThreadedTCPServer, int, str]:
         raise
     actual_port = srv.server_address[1]
     _clear_fallback()
-    # A fresh proxy owns no tunnels; republishing zero clears the count left by
-    # the process it replaces so the guard does not wait on a phantom stream.
+    # A fresh proxy owns no tunnels; republishing zero clears the count and the
+    # byte stamp left by the process it replaces so the guard does not wait on
+    # a phantom stream.
+    _reset_tunnel_activity()
     _publish_tunnel_count()
     _record_event(
         "start",
