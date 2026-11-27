@@ -69,7 +69,9 @@ jobs:
           "size={0:N1} MB" -f ($item.Length / 1MB)
           "file_version=$($item.VersionInfo.FileVersion)"
           "sha256=$sha"
-          "SHA256  $sha" | Out-File -Encoding ascii -FilePath "OpencodeUnlimited-Multi.exe.sha256"
+          # `<hash>  <file>` so `sha256sum -c` and `certutil -hashfile` agree.
+          "$sha  OpencodeUnlimited-Multi.exe" |
+            Out-File -Encoding ascii -FilePath "OpencodeUnlimited-Multi.exe.sha256"
 
       - name: Smoke test that the dashboard starts
         continue-on-error: true
