@@ -573,8 +573,12 @@ class AvatarControlApi:
             code = probe.get("code", "")
             failing = proxy.get("fallback_active") or code in ("upstream", "timeout")
             if failing:
-                last_hop = self._repair_last.get("hop", 0.0)
-                if proxy.get("fallback_active") and now - last_hop > 600.0 and proxy.get("errors_5m", 0) >= 4:
+                last_hop = self._repair_last.get("hop")
+                if (
+                    proxy.get("fallback_active")
+                    and (last_hop is None or now - last_hop > 600.0)
+                    and proxy.get("errors_5m", 0) >= 4
+                ):
                     action, reason = "repair_warp", "The tunnel kept failing after an edge change"
                 else:
                     action, reason = "hop", "The local proxy could not reach opencode.ai"
@@ -583,8 +587,11 @@ class AvatarControlApi:
             return
 
         with self._repair_lock:
-            last = self._repair_last.get(action, 0.0)
-            if now - last < AUTO_REPAIR_COOLDOWNS.get(action, 300.0):
+            # time.monotonic() counts from boot, not from process start, so a
+            # default of 0.0 would suppress the first repair for the cooldown
+            # window on a freshly started machine.
+            last = self._repair_last.get(action)
+            if last is not None and now - last < AUTO_REPAIR_COOLDOWNS.get(action, 300.0):
                 return
             self._repair_last[action] = now
 

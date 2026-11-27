@@ -63,7 +63,9 @@ class AccountListTests(unittest.TestCase):
             account_pool._run(["switch", "opencode", "cred_b"], 5.0)
 
         command = run.call_args.args[0]
-        self.assertEqual(command[:2], ["cmd.exe", "/c"])
+        # COMSPEC is an absolute path on Windows, so compare the name only.
+        self.assertIn("cmd.exe", command[0].lower())
+        self.assertEqual(command[1], "/c")
         self.assertEqual(command[2], shim)
         self.assertEqual(command[3:], ["auth", "switch", "opencode", "cred_b"])
 

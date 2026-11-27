@@ -693,6 +693,18 @@ class AutoRepairTests(unittest.TestCase):
 
         self.assertEqual(api._repair_performed, ["hop"])
 
+    def test_a_freshly_booted_clock_still_allows_the_first_repair(self) -> None:
+        # time.monotonic() counts from boot, so a machine that started seconds
+        # ago must not be read as "a repair just ran".
+        state = self._state(wired=True, listening=True, keeper_running=True)
+        state["proxy"] = {"fallback_active": True, "errors_5m": 1}
+        api = self._api(state)
+
+        with mock.patch.object(avatar_ui.time, "monotonic", return_value=5.0):
+            api._auto_repair_tick()
+
+        self.assertEqual(api._repair_performed, ["hop"])
+
     def test_repeated_repairs_respect_the_cooldown(self) -> None:
         state = self._state(wired=True, listening=False, keeper_running=False)
         api = self._api(state)
