@@ -1,0 +1,103 @@
+name: Build Windows exe
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - 'fix/**'
+      - 'release/**'
+    tags:
+      - 'v*'
+    paths:
+      - 'src/**'
+      - 'build_multi_exe.ps1'
+      - 'scripts/build_common.ps1'
+      - 'requirements.txt'
+      - '.github/workflows/build-windows-exe.yml'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-windows-exe-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build OpencodeUnlimited-Multi.exe
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Show toolchain
+        run: |
+          python --version
+          pyinstaller --version
+
+      - name: Run the test suite
+        run: python -m pytest -q
+
+      - name: Build the executable
+        shell: pwsh
+        run: ./build_multi_exe.ps1
+
+      - name: Inspect the executable
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $exe = "OpencodeUnlimited-Multi.exe"
+          if (-not (Test-Path $exe)) { throw "the build produced no $exe" }
+          $item = Get-Item $exe
+          if ($item.Length -lt 5MB) { throw "$exe is only $($item.Length) bytes" }
+          $head = [IO.File]::ReadAllBytes($exe)[0..1]
+          if ($head[0] -ne 0x4D -or $head[1] -ne 0x5A) { throw "$exe is not a PE image" }
+          $sha = (Get-FileHash $exe -Algorithm SHA256).Hash.ToLower()
+          "size={0:N1} MB" -f ($item.Length / 1MB)
+          "file_version=$($item.VersionInfo.FileVersion)"
+          "sha256=$sha"
+          "SHA256  $sha" | Out-File -Encoding ascii -FilePath "OpencodeUnlimited-Multi.exe.sha256"
+
+      - name: Smoke test that the dashboard starts
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath ".\OpencodeUnlimited-Multi.exe" -PassThru
+          Start-Sleep -Seconds 30
+          if ($p.HasExited) { throw "the dashboard exited early with code $($p.ExitCode)" }
+          Stop-Process -Id $p.Id -Force
+          "the dashboard stayed up"
+
+      - name: Upload the executable
+        uses: actions/upload-artifact@v4
+        with:
+          name: OpencodeUnlimited-Multi
+          path: |
+            OpencodeUnlimited-Multi.exe
+            OpencodeUnlimited-Multi.exe.sha256
+          if-no-files-found: error
+
+      - name: Attach the executable to the release
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $tag = $env:GITHUB_REF_NAME
+          gh release view $tag *> $null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $tag --title "Opencode Unlimited $tag" --notes "Opencode Unlimited $tag" --latest
+          }
+          gh release upload $tag OpencodeUnlimited-Multi.exe OpencodeUnlimited-Multi.exe.sha256 --clobber
