@@ -57,7 +57,7 @@ This tool monitors OpenCode logs for quota and rate-limit errors, cycles the act
 * **Dashboard redesign.** Dark single-surface layout, segmented egress tabs, health
   issues as rows with an inline fix button, sticky log panel that fills its column,
   glass tooltips, and a confirm modal. Same controls, same ids, same API.
-* **Version 4.0** across `build_exe.ps1`, `build_multi_exe.ps1`, the installers, the
+* **Version 4.0.2** across `build_exe.ps1`, `build_multi_exe.ps1`, the installers, the
   window title, and the probe user agent.
 
 ---
