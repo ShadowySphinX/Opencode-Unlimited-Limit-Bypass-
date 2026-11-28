@@ -37,6 +37,7 @@ from ouc_common import (
     BIN_DIR,
     CREATE_NO_WINDOW,
     DEST_DIR,
+    GUARD_AUDIT_FILE,
     GUARD_LOG_FILE,
     GUARD_STATE_FILE,
     KEEPER_LOG_FILE,
@@ -114,6 +115,9 @@ HEARTBEAT_STALE = 240.0
 AUTO_REPAIR_FILE = LANE_DIR / "auto_repair.json"
 AUTO_REPAIR_LOG = LANE_DIR / "auto_repair.log"
 AUTO_REPAIR_TICK = 25.0
+# One failed probe is a blip; a rotation nobody asked for looks like a bug, so
+# the repair loop waits for a second consecutive failure.
+AUTO_REPAIR_PROBE_STREAK = 2
 AUTO_REPAIR_MAX_PER_HOUR = 6
 AUTO_REPAIR_COOLDOWNS = {
     "start_keeper": 120.0,
@@ -249,6 +253,19 @@ def _tail_lines(path: Path, count: int = 75) -> list[str]:
         return lines[-count:]
     except Exception:
         return []
+
+
+def _tail_audit(count: int = 8) -> list[dict]:
+    """The newest guard audit records, newest last."""
+    records: list[dict] = []
+    for line in _tail_lines(GUARD_AUDIT_FILE, count):
+        try:
+            item = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(item, dict):
+            records.append(item)
+    return records
 
 
 # EPIPE is deliberately absent: OpenCode reports a closed stdout/stderr pipe as
@@ -503,6 +520,7 @@ class AvatarControlApi:
         self._probe_ts = 0.0
         self._repair_lock = threading.Lock()
         self._repair_last: dict[str, float] = {}
+        self._probe_fail_streak = 0
         self._repair_actions: list[dict] = []
         self._repair_status = "Watching for connection problems"
         self._repair_enabled = self._load_repair_setting()
@@ -572,7 +590,9 @@ class AvatarControlApi:
         elif mode in ("warp", "clean") and services["proxy_listening"] and not warp["rotating"]:
             code = probe.get("code", "")
             failing = proxy.get("fallback_active") or code in ("upstream", "timeout")
-            if failing:
+            streak = int(getattr(self, "_probe_fail_streak", 0) or 0) + 1 if failing else 0
+            self._probe_fail_streak = streak
+            if failing and streak >= AUTO_REPAIR_PROBE_STREAK:
                 last_hop = self._repair_last.get("hop")
                 if (
                     proxy.get("fallback_active")
@@ -867,6 +887,11 @@ class AvatarControlApi:
                 "last_hop": int(guard_state.get("last_hop", 0) or 0),
                 "failed_hops": int(guard_state.get("failed_hops", 0) or 0),
                 "backoff_until": int(guard_state.get("backoff_until", 0) or 0),
+                "retry_level": int(guard_state.get("retry_level", 0) or 0),
+                # One line that answers "why did it rotate / why did it not".
+                "last_decision": str(guard_state.get("last_decision", "") or ""),
+                "last_decision_at": int(guard_state.get("last_decision_at", 0) or 0),
+                "audit": _tail_audit(8),
                 "db": _read_db_stats(),
                 "log_size_bytes": log_size,
             },
@@ -1511,6 +1536,30 @@ class AvatarControlApi:
             self._egress_v6 = ""
         return {"ok": rc == 0, "message": "WARP disconnected." if rc == 0 else msg}
 
+    def _record_manual_hop(self, old_addr: str, new_addr: str, source: str) -> None:
+        """Write a manual rotation through the guard's own recorder."""
+        try:
+            from zen_guard import record_hop
+        except Exception:
+            return
+        state: dict = {}
+        if GUARD_STATE_FILE.is_file():
+            try:
+                state = json.loads(GUARD_STATE_FILE.read_text(encoding="utf-8"))
+            except Exception:
+                state = {}
+        record_hop(state, old_addr, new_addr, source=source, clear_pauses=True)
+
+    def _unlock_after_rotation(self) -> str:
+        """Clear the client lock and continue the chats after a manual rotation."""
+        try:
+            from auto_resume import resume_active_session
+
+            _ok, msg = resume_active_session(None)
+            return msg
+        except Exception as exc:
+            return f"unlock note: {exc}"
+
     def hop_now(self) -> dict:
         if not self._action_lock.acquire(blocking=False):
             return {"ok": False, "message": "Another rotation or setup action is already running."}
@@ -1524,11 +1573,17 @@ class AvatarControlApi:
                 from tor_manager import rotate_tor_circuit
                 ok, msg = rotate_tor_circuit()
                 self._refresh_egress_async(force=True)
+                if ok:
+                    self._record_manual_hop("", "", "manual-tor")
+                    msg = f"{msg} | {self._unlock_after_rotation()}"
                 return {"ok": ok, "message": msg}
             if mode == "custom":
                 from proxy_chain import rotate_custom_proxy
                 ok, msg = rotate_custom_proxy()
                 self._refresh_egress_async(force=True)
+                if ok:
+                    self._record_manual_hop("", "", "manual-custom")
+                    msg = f"{msg} | {self._unlock_after_rotation()}"
                 return {"ok": ok, "message": msg}
 
             warp = find_warp_cli()
@@ -1570,25 +1625,13 @@ class AvatarControlApi:
                 ov = "auto"
             if ov == "auto":
                 (LANE_DIR / "edge_reroll").write_text(str(time.time()), encoding="utf-8")
-            # Record hop in state.json
-            if GUARD_STATE_FILE.is_file():
-                try:
-                    st = json.loads(GUARD_STATE_FILE.read_text(encoding="utf-8"))
-                except Exception:
-                    st = {}
-            else:
-                st = {}
-            st["hops"] = int(st.get("hops", 0) or 0) + 1
-            st["last_hop"] = int(time.time())
-            st["current"] = new_v6
-            # A manual rotation is an explicit request to try again now.
-            st["failed_hops"] = 0
-            st["backoff_until"] = 0
-            st["hop_counted"] = 0
-            GUARD_STATE_FILE.write_text(json.dumps(st), encoding="utf-8")
+            # The same recorder the guard uses: last_ok_hop, pauses and the
+            # audit line all have to agree, whether the user or the guard rotated.
+            self._record_manual_hop(old_v6, new_v6, "manual")
             old_p = normalize_v6_64(old_v6) or "?"
             new_p = normalize_v6_64(new_v6) or new_v6
-            return {"ok": True, "message": f"Rotated /64: {old_p} -> {new_p}"}
+            unlock = self._unlock_after_rotation()
+            return {"ok": True, "message": f"Rotated /64: {old_p} -> {new_p} | {unlock}"}
         finally:
             self._action_lock.release()
 
@@ -1976,13 +2019,14 @@ class AvatarControlApi:
                 from ouc_common import find_warp_cli, hop_once
                 wbin = find_warp_cli()
                 if wbin:
+                    old_ip = self._egress_v6
                     with keeper_pause_ctx("avatar-ui-deep-reset", seconds=300):
-                        new_ip = hop_once(wbin, previous=self._egress_v6)
-                    rot_msg = (
-                        f"Rotated WARP IP: {new_ip}"
-                        if new_ip
-                        else "WARP reconnect failed"
-                    )
+                        new_ip = hop_once(wbin, previous=old_ip)
+                    if new_ip:
+                        self._record_manual_hop(old_ip, new_ip, "deep-reset")
+                        rot_msg = f"Rotated WARP IP: {new_ip} | {self._unlock_after_rotation()}"
+                    else:
+                        rot_msg = "WARP reconnect failed"
         except Exception as exc:
             rot_msg = f"Rotation note: {exc}"
 
@@ -1999,6 +2043,8 @@ class AvatarControlApi:
         except Exception:
             st = {}
         st["blacklist"] = []
+        # A day map left behind would keep treating a cleared block as burnt.
+        st["blacklist_day"] = {}
         GUARD_STATE_FILE.write_text(json.dumps(st), encoding="utf-8")
         return {"ok": True, "message": "Cleared /64 blacklist."}
 

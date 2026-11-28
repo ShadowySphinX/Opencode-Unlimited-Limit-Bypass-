@@ -264,6 +264,23 @@ def main() -> int:
     else:
         _warn(f"opencode not on PATH - add {BIN_DIR} to User PATH")
 
+    # 9. Client-side lock rows (names only - never the values)
+    try:
+        from auto_resume import list_limit_state_keys
+
+        lock_rows = list_limit_state_keys()
+        if lock_rows:
+            names = sorted({name for _db, name in lock_rows})
+            _warn(
+                "client lock rows present: "
+                + ", ".join(names)
+                + " - the next rotation clears them"
+            )
+        else:
+            _ok("no client-side limit lock rows")
+    except Exception as exc:
+        _warn(f"client lock check skipped: {exc}")
+
     print("")
     print("  all [OK] = ready. run `opencode` from a fresh terminal.")
     print("")

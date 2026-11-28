@@ -684,11 +684,23 @@ class AutoRepairTests(unittest.TestCase):
             api2._auto_repair_tick()
         self.assertEqual(api2._repair_performed, [])
 
+    def test_a_single_failed_probe_is_only_a_blip(self) -> None:
+        # One bad probe does not justify reconnecting a healthy tunnel; a
+        # rotation nobody asked for reads as a bug.
+        state = self._state(wired=True, listening=True, keeper_running=True)
+        state["proxy"] = {"fallback_active": True, "errors_5m": 1}
+        api = self._api(state)
+
+        api._auto_repair_tick()
+
+        self.assertEqual(api._repair_performed, [])
+
     def test_fallback_changes_edge_instead_of_restarting_a_healthy_route(self) -> None:
         state = self._state(wired=True, listening=True, keeper_running=True)
         state["proxy"] = {"fallback_active": True, "errors_5m": 1}
         api = self._api(state)
 
+        api._auto_repair_tick()
         api._auto_repair_tick()
 
         self.assertEqual(api._repair_performed, ["hop"])
@@ -701,6 +713,7 @@ class AutoRepairTests(unittest.TestCase):
         api = self._api(state)
 
         with mock.patch.object(avatar_ui.time, "monotonic", return_value=5.0):
+            api._auto_repair_tick()
             api._auto_repair_tick()
 
         self.assertEqual(api._repair_performed, ["hop"])
@@ -962,7 +975,7 @@ class FreeWallTests(unittest.TestCase):
         )
         self.assertEqual(reset, datetime(2026, 11, 18, 0, 0, tzinfo=timezone.utc))
 
-    def test_two_fresh_addresses_that_hit_the_free_wall_pause_until_reset(self) -> None:
+    def test_two_fresh_addresses_that_hit_the_free_wall_escalate_instead_of_stopping(self) -> None:
         now = int(datetime(2026, 11, 17, 12, 0, tzinfo=timezone.utc).timestamp())
         state = zen_guard._default_state()
         state["last_ok_hop"] = now - 30
@@ -970,17 +983,35 @@ class FreeWallTests(unittest.TestCase):
 
         with mock.patch.object(zen_guard, "_save_state"), mock.patch.object(
             zen_guard, "append_log"
-        ), mock.patch.object(zen_guard, "_egress_mode", return_value="warp"):
+        ), mock.patch.object(zen_guard, "_egress_mode", return_value="warp"), \
+                mock.patch.object(zen_guard, "FREE_WALL_LATCH", False):
             self.assertFalse(zen_guard._note_wall(state, now))
             self.assertEqual(state["free_wall_hops"], 1)
 
             state["last_ok_hop"] = now + 100
             state["last_free_wall"] = now + 105
-            self.assertTrue(zen_guard._note_wall(state, now + 110))
+            self.assertFalse(zen_guard._note_wall(state, now + 110))
 
-        self.assertEqual(
-            state["free_wall_until"], zen_guard._next_utc_midnight(now + 110)
-        )
+        # No all-day stop: the next attempt is simply further out.
+        self.assertEqual(state["free_wall_until"], 0)
+        self.assertEqual(state["backoff_until"], 0)
+        self.assertEqual(state["retry_level"], 1)
+        self.assertEqual(zen_guard._rotation_wait(state), 2 * 60)
+
+    def test_the_latch_still_exists_behind_the_environment_flag(self) -> None:
+        now = int(datetime(2026, 11, 17, 12, 0, tzinfo=timezone.utc).timestamp())
+        state = zen_guard._default_state()
+        state["last_ok_hop"] = now - 30
+        state["last_free_wall"] = now - 5
+        state["free_wall_hops"] = 1
+
+        with mock.patch.object(zen_guard, "_save_state"), mock.patch.object(
+            zen_guard, "append_log"
+        ), mock.patch.object(zen_guard, "_egress_mode", return_value="warp"), \
+                mock.patch.object(zen_guard, "FREE_WALL_LATCH", True):
+            self.assertTrue(zen_guard._note_wall(state, now))
+
+        self.assertEqual(state["free_wall_until"], zen_guard._next_utc_midnight(now))
         self.assertEqual(state["backoff_until"], state["free_wall_until"])
 
 

@@ -46,11 +46,28 @@ def main() -> int:
         print("-- rotation failed; the keeper will keep the tunnel alive and retry --")
         return 1
 
+    # Use the guard's recorder so a manual hop leaves last_ok_hop and the pauses
+    # in the same shape the guard expects; a bare clear left the guard paused.
     try:
-        from auto_resume import clear_opencode_free_limit
-        clear_opencode_free_limit()
-    except Exception:
-        pass
+        from zen_guard import record_hop
+
+        state: dict = {}
+        if GUARD_STATE_FILE.is_file():
+            try:
+                state = json.loads(GUARD_STATE_FILE.read_text(encoding="utf-8"))
+            except Exception:
+                state = {}
+        record_hop(state, old_v6, new_v6, source="manual-cli", clear_pauses=True)
+    except Exception as exc:
+        print(f"-- could not update the guard state: {exc} --")
+
+    try:
+        from auto_resume import resume_active_session
+
+        _ok, msg = resume_active_session(None)
+        print(f"-- unlock: {msg} --")
+    except Exception as exc:
+        print(f"-- unlock note: {exc} --")
 
     print(f"new /64: {new_v6}")
     old_prefix = normalize_v6_64(old_v6)

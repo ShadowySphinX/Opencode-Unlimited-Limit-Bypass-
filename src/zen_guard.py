@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import time
 from datetime import datetime, timedelta, timezone
@@ -21,6 +22,7 @@ if _SCRIPTS.is_dir() and str(_SCRIPTS) not in sys.path:
     sys.path.append(str(_SCRIPTS))
 
 from ouc_common import (
+    GUARD_AUDIT_FILE as GUARD_DIR_AUDIT,
     GUARD_LOG_FILE,
     GUARD_STATE_FILE,
     LANE_DIR,
@@ -36,6 +38,37 @@ from ouc_common import (
     normalize_v6_64,
 )
 import account_pool
+
+# Markers that name the free allowance itself: these are a wall on their own.
+PRIMARY_WALL_MARKERS = (
+    "freeusagelimiterror",
+    "free usage limit error",
+    "free usage limit",
+    "free usage exceeded",
+    "free-tier usage limit",
+)
+# Generic markers: only a wall when the line also looks like an error record,
+# because a healthy log mentions "rate limit" in config and error text.
+SECONDARY_WALL_MARKERS = (
+    "quotaexceeded",
+    "quota exceeded",
+    "quota_exceeded",
+    "usage limit reached",
+    "exceeded your current quota",
+    "credits exhausted",
+    "rate limit exceeded",
+    "rate_limit_exceeded",
+    "rate limited",
+    "ratelimited",
+    "resource_exhausted",
+    "429 too many requests",
+    "status=429",
+    "status: 429",
+    "status 429",
+    "code=429",
+)
+ERROR_RECORD_MARKERS = ("level=error", "level: error", '"level":"error"', "ai_apicallerror", "sessionid=ses_")
+_LOG_TIMESTAMP_RE = re.compile(r"timestamp=(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})")
 
 POLL_SECONDS = 10
 COOLDOWN_SECONDS = 75
@@ -55,8 +88,28 @@ BACKOFF_SECONDS = 2 * 60
 # each attempt reconnects WARP and cuts live streams.
 ROTATION_RETRY_SECONDS = 10 * 60
 # Confirmed new IPv6 addresses that still hit the free wall mean the allowance
-# is not following the IP. Stop rotating until it resets at 00:00 UTC.
+# is probably not following the IP. That is worth a longer wait, never a stop
+# for the rest of the day: the wait escalates and is capped below.
 FREE_WALL_HOPS_MAX = 2
+# Retry ladder after a wall the last rotation did not fix. The first step is the
+# normal cooldown; each repeat doubles the wait up to the cap, and a hop that
+# survives REWALL_SECONDS resets the ladder.
+RETRY_STEPS = (COOLDOWN_SECONDS, 2 * 60, 5 * 60, 10 * 60)
+# Set OUC_FREE_WALL_LATCH=1 to restore the old "stop until 00:00 UTC" behaviour.
+FREE_WALL_LATCH = os.environ.get("OUC_FREE_WALL_LATCH", "").strip() == "1"
+# A wall this soon after the guard's own 'continue' measures that prompt, not
+# the address, so it must not count as proof that the new /64 is spent.
+SELF_INFLICTED_SECONDS = 120
+# Every wall, gate decision, hop and unlock leaves one line here so "it did
+# nothing" can always be explained afterwards.
+AUDIT_FILE = GUARD_DIR_AUDIT
+AUDIT_ROLL_BYTES = 1_000_000
+# A log line older than this is history. Without the check, a guard restart or
+# a log truncation replays old walls as if they had just happened.
+WALL_LINE_MAX_AGE = 120
+# The log reader is the fast path; the database is asked less often so a wall
+# whose log line never matched still triggers a rotation.
+DB_WALL_SCAN_SECONDS = 60
 HEARTBEAT_FILE = GUARD_LOG_FILE.parent / "heartbeat.txt"
 PENDING_MAX_AGE = 30 * 60
 # The guard learns about walls from the log, so a session that hit the limit
@@ -110,6 +163,13 @@ def _default_state(offset: int = 0) -> dict:
         "accounts_burned": {},
         "account_switches": 0,
         "account_switch_day": 0,
+        "retry_level": 0,
+        "retry_marked_hop": 0,
+        "ladder_marked_hop": 0,
+        "switch_pending": {},
+        "db_scan_at": 0,
+        "last_decision": "",
+        "last_decision_at": 0,
     }
 
 
@@ -138,6 +198,35 @@ def _save_state(state: dict) -> None:
         os.replace(tmp, GUARD_STATE_FILE)
     except Exception:
         pass
+
+
+def _audit(state: dict, event: str, **fields) -> dict:
+    """Append one machine-readable line so any silent poll can be explained later."""
+    record: dict = {"ts": int(time.time()), "event": event, "mode": _egress_mode()}
+    for key, value in fields.items():
+        if value is not None:
+            record[key] = value
+    try:
+        path = AUDIT_FILE
+        try:
+            if path.stat().st_size > AUDIT_ROLL_BYTES:
+                path.replace(path.with_name(path.name + ".1"))
+        except OSError:
+            pass
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(record, separators=(",", ":")) + "\n")
+    except Exception:
+        pass
+    decision = str(fields.get("decision") or "")
+    if decision:
+        reason = str(fields.get("reason") or "")
+        state["last_decision"] = f"{decision} - {reason}" if reason else decision
+        state["last_decision_at"] = record["ts"]
+    return record
+
+
+def _decision_text(decision: str, reason: str = "") -> str:
+    return f"{decision} - {reason}" if reason else decision
 
 
 def _resumable(state: dict, now: float | None = None) -> list[str]:
@@ -276,6 +365,8 @@ def _rescue_stuck_sessions(state: dict, now: int | None = None) -> int:
         GUARD_LOG_FILE,
         f"{queued} chat(s) were left on the free limit before this start - resuming them",
     )
+    _audit(state, "wall", source="db", sessions=queued, decision="resume-only",
+           reason="chats left on the wall before this start")
     _dispatch_auto_resume(state)
     return queued
 
@@ -322,10 +413,38 @@ def _switch_account(state: dict, now: int) -> bool:
             GUARD_LOG_FILE,
             f"account switch to '{target['label']}' failed - staying on the current one",
         )
+        _audit(state, "decision", decision="switch-failed", reason="the switch command failed")
+        return False
+    # Only a switch the client really took is worth anything.
+    try:
+        current = next((item for item in account_pool.accounts() if item.get("active")), None)
+    except Exception:
+        current = None
+    if not current or str(current.get("id")) != str(target["id"]):
+        append_log(
+            GUARD_LOG_FILE,
+            f"account switch to '{target['label']}' did not take effect - staying on the current one",
+        )
+        _audit(
+            state,
+            "decision",
+            decision="switch-failed",
+            reason="the account pool still reports another account as active",
+        )
         return False
     if active:
-        burned[str(active["id"])] = today
-    for key in ("backoff_until", "free_wall_until", "free_wall_hops", "failed_hops", "defer_since"):
+        # Debts are settled by evidence: the previous account is only marked
+        # spent when a wall follows inside the switch window.
+        state["switch_pending"] = {"account": str(active["id"]), "at": now}
+    for key in (
+        "backoff_until",
+        "free_wall_until",
+        "free_wall_hops",
+        "free_wall_counted",
+        "failed_hops",
+        "defer_since",
+        "retry_level",
+    ):
         state[key] = 0
     state["last_ok_hop"] = now
     state["hop_counted"] = now
@@ -343,6 +462,13 @@ def _switch_account(state: dict, now: int) -> bool:
         GUARD_LOG_FILE,
         f"free limit answered with a fresh account: '{target['label']}' "
         f"(switch {state['account_switches']} today) - no tunnel reconnect needed",
+    )
+    _audit(
+        state,
+        "decision",
+        decision="switch-account",
+        reason=f"'{target['label']}' is now the active account",
+        cleared_rows=None,
     )
     _dispatch_auto_resume(state)
     return True
@@ -367,7 +493,11 @@ def _pause_left(state: dict, now: int) -> int:
         return 0
     if now >= until:
         was_free_wall = bool(int(state.get("free_wall_until", 0) or 0))
-        waiting = _resumable(state)
+        # pending is pruned after 30 minutes, so a long pause can expire with
+        # nothing left to resume. Ask the database instead of trusting it.
+        for sid in _sessions_stuck_on_wall(now):
+            state.setdefault("pending", {}).setdefault(sid, now)
+        waiting = _resumable(state, float(now))
         state["backoff_until"] = 0
         state["failed_hops"] = 0
         state["free_wall_hops"] = 0
@@ -385,6 +515,7 @@ def _pause_left(state: dict, now: int) -> int:
             _dispatch_auto_resume(state)
         else:
             append_log(GUARD_LOG_FILE, "rotation pause is over - trying again on the next limit")
+        _audit(state, "decision", decision="pause-over", reason=f"resumed {len(waiting)} chat(s)")
         return 0
     return until - now
 
@@ -456,6 +587,36 @@ def _egress_mode() -> str:
         return "warp"
 
 
+def _retry_wait(state: dict) -> int:
+    """The current rung of the retry ladder: 75s, then 2, 5, 10 minutes."""
+    try:
+        level = int(state.get("retry_level", 0) or 0)
+    except (TypeError, ValueError):
+        level = 0
+    level = max(0, min(level, len(RETRY_STEPS) - 1))
+    return RETRY_STEPS[level]
+
+
+def _wall_is_self_inflicted(state: dict, sessions: list[str] | None, now: int) -> bool:
+    """True when the guard sent the 'continue' that produced this wall.
+
+    A wall that lands moments after the guard's own prompt measures that prompt,
+    not the new address: counting it as a spent block used to stop rotation for
+    the rest of the day.
+    """
+    if not sessions:
+        return False
+    resumed = state.get("resumed") or {}
+    for sid in sessions:
+        try:
+            stamp = float(resumed.get(sid, 0) or 0)
+        except (TypeError, ValueError):
+            return False
+        if not stamp or not (0 <= now - stamp <= SELF_INFLICTED_SECONDS):
+            return False
+    return True
+
+
 def _rotation_wait(state: dict) -> int:
     """Seconds to wait after the last hop before reconnecting WARP again.
 
@@ -469,7 +630,7 @@ def _rotation_wait(state: dict) -> int:
         return COOLDOWN_SECONDS
     if int(state.get("failed_hops", 0) or 0) > 0:
         return max(COOLDOWN_SECONDS, ROTATION_RETRY_SECONDS)
-    return COOLDOWN_SECONDS
+    return _retry_wait(state)
 
 
 def _rotation_blocked(state: dict, now: int, live: bool) -> str:
@@ -504,37 +665,169 @@ def _rode_the_fallback(last_hop: int, wall_at: int) -> bool:
     return last_hop - FALLBACK_WINDOW <= stamp <= wall_at + FALLBACK_WINDOW
 
 
-def _note_wall(state: dict, now: int) -> bool:
-    """Track walls that return right after a new IP and pause rotation when it's clearly a loop.
+def _resolve_pending_burn(state: dict, now: int) -> None:
+    """Decide whether the account we switched away from was really spent.
 
-    Returns True while auto-rotation is paused (the caller should not rotate or resume).
+    A credential is only marked burnt when the wall lands inside the same short
+    window as the switch. Otherwise that account was fine and stays usable.
+    """
+    pending = state.get("switch_pending")
+    if not isinstance(pending, dict) or not pending:
+        return
+    account = str(pending.get("account") or "")
+    try:
+        at = int(pending.get("at", 0) or 0)
+    except (TypeError, ValueError):
+        at = 0
+    state["switch_pending"] = {}
+    if not account or not at:
+        return
+    if now - at <= SELF_INFLICTED_SECONDS:
+        burned = state.setdefault("accounts_burned", {})
+        if isinstance(burned, dict):
+            burned[account] = _utc_day()
+        append_log(
+            GUARD_LOG_FILE,
+            f"the limit followed the account switch {now - at}s later - "
+            f"the previous account is spent for today",
+        )
+        _audit(
+            state,
+            "decision",
+            decision="account-burned",
+            reason=f"wall {now - at}s after the switch",
+        )
+    else:
+        _audit(
+            state,
+            "decision",
+            decision="account-ok",
+            reason="the new account held past the switch window",
+        )
+
+
+def record_hop(
+    state: dict,
+    old_addr: str,
+    new_addr: str,
+    source: str = "guard",
+    clear_pauses: bool = False,
+) -> None:
+    """Write one confirmed hop into the guard state.
+
+    Every path that lands a new exit (guard, Try now, deep reset, zen-hop) goes
+    through here so the state, the audit and the dashboard always agree.
+    ``clear_pauses`` is for a manual rotation, which is an explicit "try again
+    now"; the automatic path leaves the policy counters to ``_note_wall``.
+    """
+    now = int(time.time())
+    state["current"] = new_addr or state.get("current", "")
+    state["hops"] = int(state.get("hops", 0) or 0) + 1
+    state["last_hop"] = now
+    state["last_ok_hop"] = now
+    state["hop_counted"] = 0
+    state["failed_hops"] = 0
+    state["defer_since"] = 0
+    if clear_pauses:
+        state["backoff_until"] = 0
+        state["backoff_logged"] = 0
+        state["free_wall_until"] = 0
+        state["free_wall_hops"] = 0
+        state["free_wall_counted"] = 0
+        state["retry_level"] = 0
+        state["retry_marked_hop"] = 0
+        state["ladder_marked_hop"] = 0
+        state["switch_pending"] = {}
+    _audit(
+        state,
+        "hop",
+        source=source,
+        old_prefix=normalize_v6_64(old_addr),
+        new_prefix=normalize_v6_64(new_addr),
+        old_address=old_addr,
+        new_address=new_addr,
+    )
+    _save_state(state)
+
+
+def _note_wall(state: dict, now: int, sessions: list[str] | None = None) -> bool:
+    """Track walls that return right after a new IP and size the next wait.
+
+    Returns True while auto-rotation must not run now: either a pause is active,
+    or the retry ladder has moved the next attempt further out.
     """
     _pause_left(state, now)
-    if now < int(state.get("backoff_until", 0) or 0):
+    _resolve_pending_burn(state, now)
+    paused_until = int(state.get("backoff_until", 0) or 0)
+    if now < paused_until:
         if now - int(state.get("backoff_logged", 0) or 0) >= 60:
             state["backoff_logged"] = now
-            _save_state(state)
-            left = max(0, (int(state["backoff_until"]) - now) // 60)
+            left = max(0, (paused_until - now) // 60)
             append_log(
                 GUARD_LOG_FILE,
                 f"limit seen again, but auto-rotation is paused for ~{left} more min "
                 f"(new IPs kept hitting the limit immediately)",
             )
+            _audit(
+                state,
+                "decision",
+                decision=f"paused:{paused_until}",
+                reason=f"{left} min left in the pause",
+            )
+            _save_state(state)
         return True
 
     last_hop = int(state.get("last_ok_hop", 0) or 0)
-    if last_hop and now - last_hop <= REWALL_SECONDS:
-        if int(state.get("hop_counted", 0) or 0) != last_hop:
-            state["hop_counted"] = last_hop
-            state["failed_hops"] = int(state.get("failed_hops", 0) or 0) + 1
+    if _wall_is_self_inflicted(state, sessions, now):
+        # The guard asked this chat to continue moments ago. That wall measures
+        # the prompt, not the new address, so it is not proof the block is
+        # spent - but it should still slow the reconnect cadence down once per
+        # hop, so a wall the guard keeps causing cannot churn the tunnel.
+        if int(state.get("retry_marked_hop", 0) or 0) != last_hop:
+            state["retry_marked_hop"] = last_hop
+            state["retry_level"] = min(
+                int(state.get("retry_level", 0) or 0) + 1, len(RETRY_STEPS) - 1
+            )
+        if now - int(state.get("own_wall_logged", 0) or 0) >= 60:
+            state["own_wall_logged"] = now
             append_log(
                 GUARD_LOG_FILE,
-                f"limit came back {now - last_hop}s after the last IP change "
-                f"(failed attempt {state['failed_hops']} of {FAILED_HOPS_MAX})",
+                "limit came back seconds after the guard's own 'continue' - "
+                "not counted against the new address",
+            )
+            _audit(
+                state,
+                "decision",
+                decision="wall-own",
+                reason="limit followed the guard's own continue",
+            )
+        _save_state(state)
+        return False
+
+    if last_hop and now - last_hop <= REWALL_SECONDS:
+        # A wall this soon after a confirmed hop means that address did not
+        # help. It is not a failed rotation (the hop itself landed), so the
+        # wait is sized by the free-wall ladder below, not by failed_hops.
+        if int(state.get("hop_counted", 0) or 0) != last_hop:
+            state["hop_counted"] = last_hop
+            append_log(
+                GUARD_LOG_FILE,
+                f"limit came back {now - last_hop}s after the last IP change",
             )
     elif last_hop:
-        # The previous IP lasted long enough: this isn't a rotation loop.
+        # The previous IP lasted long enough: this isn't a rotation loop, and
+        # the retry ladder starts from the shortest step again.
         state["failed_hops"] = 0
+        state["retry_marked_hop"] = 0
+        state["ladder_marked_hop"] = 0
+        if int(state.get("retry_level", 0) or 0):
+            state["retry_level"] = 0
+            _audit(
+                state,
+                "decision",
+                decision="retry-reset",
+                reason="the last new address held past the rewall window",
+            )
 
     free_wall = int(state.get("last_free_wall", 0) or 0)
     fresh_free = bool(last_hop) and bool(free_wall) and 0 <= free_wall - last_hop <= REWALL_SECONDS
@@ -554,6 +847,30 @@ def _note_wall(state: dict, now: int) -> bool:
                 f"request had left through the fallback route - that wall says nothing about "
                 f"the new address, so it is not counted",
             )
+            _audit(
+                state,
+                "decision",
+                decision="wall-fallback",
+                reason="the request left through the fallback route",
+            )
+    if fresh_free:
+        active_prefix = normalize_v6_64(str(state.get("current", "")))
+        if active_prefix and active_prefix in (state.get("blacklist") or []):
+            # The address that hit the wall is a block the guard already burnt,
+            # so this wall says nothing about a genuinely new address.
+            fresh_free = False
+            state["free_wall_hops"] = 0
+            append_log(
+                GUARD_LOG_FILE,
+                "the wall came from a /64 that is already blacklisted - "
+                "not counted as a fresh address hitting the limit",
+            )
+            _audit(
+                state,
+                "decision",
+                decision="wall-blacklisted",
+                reason="the active /64 was already blacklisted",
+            )
     if fresh_free:
         if int(state.get("free_wall_counted", 0) or 0) != last_hop:
             state["free_wall_counted"] = last_hop
@@ -566,31 +883,51 @@ def _note_wall(state: dict, now: int) -> bool:
     else:
         state["free_wall_hops"] = 0
 
-    if int(state.get("free_wall_hops", 0) or 0) >= FREE_WALL_HOPS_MAX:
-        until = _next_utc_midnight(now)
-        state["free_wall_until"] = until
-        state["backoff_until"] = until
-        state["backoff_logged"] = now
-        state["hop_counted"] = last_hop
-        reset_at = datetime.fromtimestamp(until, timezone.utc).strftime("%H:%M UTC")
+    if (
+        int(state.get("free_wall_hops", 0) or 0) >= FREE_WALL_HOPS_MAX
+        and int(state.get("ladder_marked_hop", 0) or 0) != last_hop
+    ):
+        if FREE_WALL_LATCH:
+            until = _next_utc_midnight(now)
+            state["free_wall_until"] = until
+            state["backoff_until"] = until
+            state["backoff_logged"] = now
+            state["hop_counted"] = last_hop
+            reset_at = datetime.fromtimestamp(until, timezone.utc).strftime("%H:%M UTC")
+            append_log(
+                GUARD_LOG_FILE,
+                f"free limit is not following the IP: {FREE_WALL_HOPS_MAX} confirmed new IPv6 "
+                f"addresses hit it again. Pausing rotation until {reset_at} (OUC_FREE_WALL_LATCH).",
+            )
+            _audit(
+                state,
+                "decision",
+                decision=f"paused:{until}",
+                reason="free-wall latch enabled by OUC_FREE_WALL_LATCH",
+            )
+            _save_state(state)
+            return True
+        # Escalate instead of stopping for the day: the wait grows to a cap and
+        # is tried again, so a block that was simply unlucky still gets a chance.
+        level = min(int(state.get("retry_level", 0) or 0) + 1, len(RETRY_STEPS) - 1)
+        state["retry_level"] = level
+        state["ladder_marked_hop"] = last_hop
+        wait = _retry_wait(state)
         append_log(
             GUARD_LOG_FILE,
             f"free limit is not following the IP: {FREE_WALL_HOPS_MAX} confirmed new IPv6 "
-            f"addresses hit it again. Pausing rotation until {reset_at}. Another provider, "
-            f"OpenCode Go, or pressing Try now is the way forward.",
+            f"addresses hit it again. Next attempt in {wait}s, capped at "
+            f"{RETRY_STEPS[-1] // 60} min - Rotate /64 Now still works.",
+        )
+        _audit(
+            state,
+            "decision",
+            decision=f"cooldown:{wait}",
+            reason="free limit kept following confirmed new /64s",
         )
         _save_state(state)
-        return True
+        return False
 
-    if int(state.get("failed_hops", 0) or 0) >= FAILED_HOPS_MAX:
-        state["backoff_until"] = now + BACKOFF_SECONDS
-        state["backoff_logged"] = now
-        append_log(
-            GUARD_LOG_FILE,
-            f"pausing auto-rotation for {BACKOFF_SECONDS // 60} min: the last "
-            f"{FAILED_HOPS_MAX} new addresses hit the limit again immediately. "
-            f"It will try one more address by itself after that, or press Rotate /64 Now.",
-        )
     _save_state(state)
     return now < int(state.get("backoff_until", 0) or 0)
 
@@ -646,8 +983,41 @@ def _is_burnt(state: dict, addr: str) -> bool:
     return prefix in _prune_blacklist(state)
 
 
-def _read_new_log_bytes(state: dict) -> tuple[bool, list[str]]:
+def _line_is_fresh(line: str, now: int) -> bool:
+    """True when a log line is news. A line without a timestamp keeps its old meaning."""
+    match = _LOG_TIMESTAMP_RE.search(line or "")
+    if not match:
+        return True
+    try:
+        stamp = (
+            datetime.strptime(match.group(1), "%Y-%m-%dT%H:%M:%S")
+            .replace(tzinfo=timezone.utc)
+            .timestamp()
+        )
+    except ValueError:
+        return True
+    return now - stamp <= WALL_LINE_MAX_AGE
+
+
+def _classify_wall_line(line: str, now: int) -> str:
+    """'wall', 'stale', or '' - is this line a limit, and is it current?
+
+    The free-limit markers name the allowance itself and stand alone. The
+    generic markers (429, "rate limited") also appear in config and in text
+    about limits, so they only count inside an error record.
+    """
+    low = (line or "").lower()
+    if not any(marker in low for marker in PRIMARY_WALL_MARKERS):
+        if not any(marker in low for marker in SECONDARY_WALL_MARKERS):
+            return ""
+        if not any(marker in low for marker in ERROR_RECORD_MARKERS):
+            return ""
+    return "wall" if _line_is_fresh(line, now) else "stale"
+
+
+def _read_new_log_bytes(state: dict, now: int | None = None) -> tuple[bool, list[str]]:
     """(wall seen since the last offset?, session IDs of the chats that hit it)."""
+    now = int(time.time()) if now is None else now
     if not OPENCODE_LOG_FILE.is_file():
         return False, []
     try:
@@ -657,65 +1027,73 @@ def _read_new_log_bytes(state: dict) -> tuple[bool, list[str]]:
 
     offset = int(state.get("offset", 0) or 0)
     if size < offset:
-        offset = 0
+        # The log was truncated or replaced. Everything before the new end has
+        # already been handled, so only the new bytes are worth reading; the old
+        # tail must not be replayed as a fresh wall.
+        state["offset"] = size
+        _audit(
+            state,
+            "log-truncated",
+            source="log",
+            offset=offset,
+            size=size,
+            decision="stale-wall",
+            reason="log shrank - old tail skipped",
+        )
+        _save_state(state)
+        return False, []
 
     start = max(offset, size - MAX_READ_BYTES)
     delta = size - start
     wall = False
+    stale = 0
+    free_wall_line = False
     sessions: list[str] = []
+    sid_reader: Callable[[str], str] | None = None
     if delta > 0:
         try:
             with OPENCODE_LOG_FILE.open("rb") as fh:
                 fh.seek(start)
                 chunk = fh.read(delta).decode("utf-8", errors="replace")
-            chunk_lower = chunk.lower()
-            wall_patterns = (
-                "quotaexceeded",
-                "quota exceeded",
-                "quota_exceeded",
-                "free usage limit",
-                "freeusagelimiterror",
-                "free usage exceeded",
-                "free-tier usage limit",
-                "usage limit reached",
-                "exceeded your current quota",
-                "credits exhausted",
-                "rate limit exceeded",
-                "rate_limit_exceeded",
-                "rate limited",
-                "ratelimited",
-                "resource_exhausted",
-                "429 too many requests",
-                "status=429",
-                "status: 429",
-                "status 429",
-                "code=429",
-            )
-            if any(p in chunk_lower for p in wall_patterns):
+            for line in chunk.splitlines():
+                verdict = _classify_wall_line(line, now)
+                if verdict == "stale":
+                    stale += 1
+                    continue
+                if verdict != "wall":
+                    continue
                 wall = True
-                sid_reader: Callable[[str], str] | None = None
-                try:
-                    from auto_resume import session_id_in
+                if "free usage limit" in line.lower() or "freeusagelimiterror" in line.lower():
+                    free_wall_line = True
+                if sid_reader is None:
+                    try:
+                        from auto_resume import session_id_in
 
-                    sid_reader = session_id_in
-                except Exception:
-                    pass
-                if sid_reader is not None:
-                    for line in chunk.splitlines():
-                        low = line.lower()
-                        if any(p in low for p in wall_patterns):
-                            sid = sid_reader(line)
-                            if sid and sid not in sessions:
-                                sessions.append(sid)
+                        sid_reader = session_id_in
+                    except Exception:
+                        sid_reader = False  # type: ignore[assignment]
+                if sid_reader:
+                    sid = sid_reader(line)
+                    if sid and sid not in sessions:
+                        sessions.append(sid)
         except OSError:
             pass
 
     state["offset"] = size
     if wall:
         state["wall_pending"] = True
-        state["wall_seen"] = int(time.time())
-        if "free usage limit" in chunk_lower or "freeusagelimiterror" in chunk_lower:
-            state["last_free_wall"] = state["wall_seen"]
+        state["wall_seen"] = now
+        if free_wall_line:
+            state["last_free_wall"] = now
+        _audit(state, "wall", source="log", sessions=len(sessions), free=free_wall_line)
+    elif stale:
+        _audit(
+            state,
+            "wall",
+            source="log",
+            decision="stale-wall",
+            reason=f"{stale} old limit line(s) ignored",
+        )
     _save_state(state)
     return wall, sessions
 
@@ -737,17 +1115,19 @@ def _rotate(state: dict, warp_bin: str | None) -> bool:
         try:
             from tor_manager import rotate_tor_circuit
             ok, msg = rotate_tor_circuit()
-            state["last_hop"] = now
-            state["hops"] = int(state.get("hops", 0) or 0) + 1
             if ok:
-                state["last_ok_hop"] = now
-            _save_state(state)
+                record_hop(state, "", "", source="guard-tor")
+            else:
+                state["last_hop"] = now
+                state["failed_hops"] = int(state.get("failed_hops", 0) or 0) + 1
+                _save_state(state)
             append_log(GUARD_LOG_FILE, f"Tor rotated #{state['hops']}: {msg}")
             if ok:
                 _dispatch_auto_resume(state)
             return ok
         except Exception as exc:
             append_log(GUARD_LOG_FILE, f"Tor rotation error: {exc}")
+            _audit(state, "decision", decision="rotate-failed", reason=f"tor: {exc}")
             return False
 
     # 2. Custom Proxy mode: cycle proxy node in pool
@@ -756,17 +1136,19 @@ def _rotate(state: dict, warp_bin: str | None) -> bool:
         try:
             from proxy_chain import rotate_custom_proxy
             ok, msg = rotate_custom_proxy()
-            state["last_hop"] = now
-            state["hops"] = int(state.get("hops", 0) or 0) + 1
             if ok:
-                state["last_ok_hop"] = now
-            _save_state(state)
+                record_hop(state, "", "", source="guard-custom")
+            else:
+                state["last_hop"] = now
+                state["failed_hops"] = int(state.get("failed_hops", 0) or 0) + 1
+                _save_state(state)
             append_log(GUARD_LOG_FILE, f"Custom proxy rotated #{state['hops']}: {msg}")
             if ok:
                 _dispatch_auto_resume(state)
             return ok
         except Exception as exc:
             append_log(GUARD_LOG_FILE, f"Custom proxy rotation error: {exc}")
+            _audit(state, "decision", decision="rotate-failed", reason=f"proxy: {exc}")
             state["last_hop"] = now
             state["hops"] = int(state.get("hops", 0) or 0) + 1
             _save_state(state)
@@ -775,6 +1157,12 @@ def _rotate(state: dict, warp_bin: str | None) -> bool:
     # 3. WARP / Clean Endpoint mode: rotate IPv6 /64 subnet
     if not warp_bin:
         append_log(GUARD_LOG_FILE, "wall detected but warp-cli is not installed for WARP rotation")
+        _audit(
+            state,
+            "decision",
+            decision="rotate-failed",
+            reason="warp-cli is not installed",
+        )
         return False
 
     old_v6 = (
@@ -821,18 +1209,10 @@ def _rotate(state: dict, warp_bin: str | None) -> bool:
     state["last_hop"] = now
     same_address = bool(old_prefix) and bool(new_v6) and normalize_v6_64(new_v6) == old_prefix
     if new_v6 and not same_address:
-        state["current"] = new_v6
-        state["hops"] = int(state.get("hops", 0) or 0) + 1
-        state["last_ok_hop"] = now
-        state["failed_hops"] = 0
         # A landed hop never lifts a pause: _pause_left owns that, so a wall the
         # guard already proved follows the IP cannot be undone by a rotation that
         # slipped past the gate.
-        if not int(state.get("free_wall_until", 0) or 0):
-            state["backoff_until"] = 0
-            state["backoff_logged"] = 0
-        state["hop_counted"] = 0
-        _save_state(state)
+        record_hop(state, old_v6, new_v6, source="guard", clear_pauses=False)
         append_log(GUARD_LOG_FILE, f"rotated #{state['hops']}: {old_v6} -> {new_v6}")
         try:
             from ouc_common import LANE_DIR
@@ -860,6 +1240,12 @@ def _rotate(state: dict, warp_bin: str | None) -> bool:
                 GUARD_LOG_FILE,
                 f"rotation ended on the same /64 ({new_v6}) - chat left paused instead of looping",
             )
+        _audit(
+            state,
+            "decision",
+            decision="rotate-failed",
+            reason=f"WARP came back on the same /64 ({new_v6})",
+        )
         _save_state(state)
         return False
 
@@ -871,7 +1257,45 @@ def _rotate(state: dict, warp_bin: str | None) -> bool:
         f"rotation failed - no confirmed new IPv6 egress. Pausing retries for "
         f"{ROTATION_RETRY_SECONDS // 60} min so the tunnel is not reconnected in a loop.",
     )
+    _audit(
+        state,
+        "decision",
+        decision="rotate-failed",
+        reason=f"no confirmed new IPv6 egress ({new_v6 or 'no address'})",
+    )
     return False
+
+
+def _shorten_old_latch(state: dict, now: int) -> None:
+    """Convert an all-day pause written by an older version into a bounded one.
+
+    Without this an upgrade during the day would inherit a pause until 00:00
+    UTC, which is exactly the behaviour this version removes.
+    """
+    if FREE_WALL_LATCH:
+        return
+    until = int(state.get("free_wall_until", 0) or 0)
+    if until <= now:
+        return
+    capped = now + RETRY_STEPS[-1]
+    state["free_wall_until"] = 0
+    state["free_wall_hops"] = 0
+    state["retry_level"] = len(RETRY_STEPS) - 1
+    state["retry_marked_hop"] = 0
+    state["ladder_marked_hop"] = 0
+    state["backoff_until"] = min(until, capped)
+    _save_state(state)
+    append_log(
+        GUARD_LOG_FILE,
+        "an all-day pause left by an older version was shortened to "
+        f"{RETRY_STEPS[-1] // 60} min - rotation keeps trying",
+    )
+    _audit(
+        state,
+        "decision",
+        decision=f"paused:{state['backoff_until']}",
+        reason="old all-day latch shortened after an upgrade",
+    )
 
 
 def main() -> int:
@@ -882,6 +1306,7 @@ def main() -> int:
 
     warp_bin = find_warp_cli()
     state = _load_state()
+    _shorten_old_latch(state, int(time.time()))
     append_log(
         GUARD_LOG_FILE,
         f"guard up (poll {POLL_SECONDS}s, cooldown {COOLDOWN_SECONDS}s, warp={'found' if warp_bin else 'none'})",
@@ -899,17 +1324,36 @@ def main() -> int:
             state = _load_state()
             now = int(time.time())
             paused = _pause_left(state, now) > 0
-            wall, sessions = _read_new_log_bytes(state)
+            wall, sessions = _read_new_log_bytes(state, now)
+            pending = state.setdefault("pending", {})
             if wall:
-                pending = state.setdefault("pending", {})
                 for sid in sessions:
                     pending.setdefault(sid, now)
                 _save_state(state)
-                # A fresh account is the cheapest answer to a wall and the only
-                # one a free-tier pause does not cover: the pause is about
-                # reconnecting the tunnel, not about who is asking.
-                if _switch_account(state, now):
+                # IP rotation comes first. A different account is only worth
+                # asking once a confirmed new /64 has already hit the wall;
+                # otherwise the first limit of the day silently spends it.
+                if int(state.get("free_wall_hops", 0) or 0) >= 1 and _switch_account(state, now):
                     continue
+            elif now - int(state.get("db_scan_at", 0) or 0) >= DB_WALL_SCAN_SECONDS:
+                # The log is the fast path; the database is the safety net for a
+                # wall whose log line never matched the markers.
+                state["db_scan_at"] = now
+                resumed = state.get("resumed") or {}
+                fresh_stuck = [
+                    sid
+                    for sid in _sessions_stuck_on_wall(now)
+                    if sid not in pending
+                    and now - float(resumed.get(sid, 0) or 0) >= STUCK_RETRY_SECONDS
+                ]
+                if fresh_stuck:
+                    wall = True
+                    state["wall_seen"] = now
+                    state["wall_pending"] = True
+                    for sid in fresh_stuck:
+                        pending.setdefault(sid, now)
+                    _audit(state, "wall", source="db", sessions=len(fresh_stuck))
+                    _save_state(state)
             if paused:
                 # Single gate in front of the IP work: while auto-rotation is
                 # paused this process neither reconnects WARP nor sends "continue".
@@ -918,7 +1362,7 @@ def main() -> int:
                 continue
 
             if wall:
-                if _note_wall(state, now):
+                if _note_wall(state, now, sessions):
                     continue
 
             last_hop = int(state.get("last_hop", 0) or 0)
@@ -931,6 +1375,12 @@ def main() -> int:
                     (state.get("pending") or {}).pop(sid, None)
                 _prune(state)
                 state["wall_pending"] = False
+                _audit(
+                    state,
+                    "decision",
+                    decision="stale-wall",
+                    reason="this wall belongs to the session that was already rotated",
+                )
                 _save_state(state)
                 continue
 
@@ -951,6 +1401,12 @@ def main() -> int:
                             GUARD_LOG_FILE,
                             "rotation held back - a request is still streaming; "
                             "the route is swapped once the session goes quiet",
+                        )
+                        _audit(
+                            state,
+                            "decision",
+                            decision="defer:live",
+                            reason="a request is still streaming",
                         )
                     state["wall_pending"] = True
                     _save_state(state)
@@ -974,6 +1430,12 @@ def main() -> int:
                         f"{len(resumable)} more chat(s) hit the limit around the last IP change "
                         f"({age}s ago) - sending them 'continue'",
                     )
+                    _audit(
+                        state,
+                        "decision",
+                        decision="resume-only",
+                        reason=f"{len(resumable)} chat(s) cut off by the same wall",
+                    )
                     _dispatch_auto_resume(state)
                 else:
                     last_log = int(state.get("last_wait_log", 0) or 0)
@@ -981,6 +1443,12 @@ def main() -> int:
                         append_log(
                             GUARD_LOG_FILE,
                             f"wall queued - waiting out cooldown ({age}s < {hold}s)",
+                        )
+                        _audit(
+                            state,
+                            "decision",
+                            decision=f"cooldown:{max(0, hold - age)}",
+                            reason=f"waiting {hold}s after the last rotation",
                         )
                         state["last_wait_log"] = now
                         _save_state(state)

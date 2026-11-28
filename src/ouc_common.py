@@ -45,6 +45,7 @@ LANE_DIR = DEST_DIR / "lane"
 PAUSE_FILE = DEST_DIR / "keeper.pause"
 GUARD_STATE_FILE = GUARD_DIR / "state.json"
 GUARD_LOG_FILE = GUARD_DIR / "guard.log"
+GUARD_AUDIT_FILE = GUARD_DIR / "guard_audit.jsonl"
 KEEPER_LOG_FILE = KEEPER_DIR / "keeper.log"
 OPENCODE_LOG_FILE = Path.home() / ".local" / "share" / "opencode" / "log" / "opencode.log"
 

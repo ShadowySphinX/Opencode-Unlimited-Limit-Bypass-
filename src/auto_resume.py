@@ -40,17 +40,71 @@ def set_auto_resume(enable: bool) -> None:
     AUTO_RESUME_FLAG.write_text("1\n" if enable else "0\n", encoding="utf-8")
 
 
-def clear_opencode_free_limit() -> int:
+# The keys OpenCode Desktop uses for the client-side lockout. Only names that
+# were confirmed are deleted: a blanket "anything containing 'limit'" would also
+# remove usage counters and model settings.
+LOCK_KEYS = (
+    "free-limit",
+    "go-upsell",
+    "free_usage_limit",
+    "usage_limit",
+    "quota_exceeded",
+)
+
+
+def drafts_databases() -> list[Path]:
+    """Every drafts.sqlite location the Desktop app has used."""
+    candidates = [
+        Path(os.environ.get("APPDATA", Path.home() / "AppData" / "Roaming")) / "ai.opencode.desktop" / "drafts.sqlite",
+        Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local")) / "ai.opencode.desktop" / "drafts.sqlite",
+        Path.home() / ".config" / "ai.opencode.desktop" / "drafts.sqlite",
+        Path.home() / ".local" / "share" / "opencode" / "drafts.sqlite",
+    ]
+    seen: list[Path] = []
+    for path in candidates:
+        if path not in seen:
+            seen.append(path)
+    return seen
+
+
+def list_limit_state_keys() -> list[tuple[str, str]]:
+    """(database, key) for every state row that looks like a limit lockout.
+
+    Diagnostic only: it reads names, never values, so a report can name the real
+    keys without exposing the user's state.
+    """
+    found: list[tuple[str, str]] = []
+    for db_path in drafts_databases():
+        if not db_path.is_file():
+            continue
+        try:
+            conn = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True, timeout=3.0)
+        except Exception:
+            continue
+        try:
+            rows = conn.execute("SELECT key FROM state").fetchall()
+            for (key,) in rows:
+                name = str(key)
+                low = name.lower()
+                if "limit" in low or "upsell" in low or "quota" in low:
+                    found.append((str(db_path), name))
+        except Exception:
+            pass
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+    return found
+
+
+def clear_opencode_free_limit(detail: list[str] | None = None) -> int:
     """Delete client-side free-limit and go-upsell lockout rows from drafts.sqlite.
 
     OpenCode Desktop stores rate limit timestamps in drafts.sqlite (table 'state').
     Even after IP rotation, the UI blocks user prompts until this timestamp is purged.
     """
-    candidates = [
-        Path(os.environ.get("APPDATA", Path.home() / "AppData" / "Roaming")) / "ai.opencode.desktop" / "drafts.sqlite",
-        Path.home() / ".config" / "ai.opencode.desktop" / "drafts.sqlite",
-        Path.home() / ".local" / "share" / "opencode" / "drafts.sqlite",
-    ]
+    candidates = drafts_databases()
     deleted = 0
     for db_path in candidates:
         if not db_path.is_file():
@@ -64,13 +118,16 @@ def clear_opencode_free_limit() -> int:
             try:
                 conn.execute("PRAGMA busy_timeout=5000")
                 cur = conn.cursor()
+                placeholders = ", ".join("?" for _ in LOCK_KEYS)
                 cur.execute(
-                    "DELETE FROM state WHERE key IN "
-                    "('free-limit', 'go-upsell', 'free_usage_limit', "
-                    "'usage_limit', 'quota_exceeded')"
+                    f"DELETE FROM state WHERE key IN ({placeholders})",
+                    LOCK_KEYS,
                 )
-                deleted += max(0, cur.rowcount)
+                rows = max(0, cur.rowcount)
+                deleted += rows
                 conn.commit()
+                if detail is not None and rows:
+                    detail.append(f"{db_path.name}: cleared {rows} lock row(s)")
             finally:
                 conn.close()
         except Exception:
@@ -107,15 +164,23 @@ def get_latest_session_info() -> tuple[str, str, str] | None:
     return None
 
 
-def send_continue_keystroke(reload_first: bool = True) -> bool:
-    """Send reload (^r) and 'continue{ENTER}' to active OpenCode Desktop or Terminal window."""
+def _deliver_keystrokes(reload_first: bool = True, text: str | None = "continue{ENTER}") -> bool:
+    """Focus OpenCode and send a reload and/or text.
+
+    ``text`` is Windows SendKeys syntax; None means "reload only", which is what
+    clears a stale limit banner without adding a turn to the chat.
+    """
     if sys.platform != "win32":
         try:
             import shutil
             if shutil.which("xdotool"):
+                reload_ok = False
                 if reload_first:
-                    subprocess.run(["xdotool", "search", "--onlyvisible", "--class", "opencode", "key", "--clearmodifiers", "ctrl+r"], capture_output=True, timeout=2.0)
+                    reload = subprocess.run(["xdotool", "search", "--onlyvisible", "--class", "opencode", "key", "--clearmodifiers", "ctrl+r"], capture_output=True, timeout=2.0)
+                    reload_ok = reload.returncode == 0
                     time.sleep(1.2)
+                if text is None:
+                    return reload_ok
                 typed = subprocess.run(["xdotool", "search", "--onlyvisible", "--class", "opencode", "type", "--clearmodifiers", "continue"], capture_output=True, timeout=2.0)
                 sent = subprocess.run(["xdotool", "search", "--onlyvisible", "--class", "opencode", "key", "--clearmodifiers", "Return"], capture_output=True, timeout=2.0)
                 # xdotool exits non-zero when no matching window exists, so a
@@ -193,6 +258,7 @@ def send_continue_keystroke(reload_first: bool = True) -> bool:
                 # Windows refused the focus change; never type into another app.
                 continue
             # If requested, send Ctrl+R to reload UI (reloading drops the free-limit block screen)
+            reloaded = False
             if reload_first and pname == "opencode.exe":
                 ps_reload = """
                 Add-Type -AssemblyName System.Windows.Forms
@@ -211,10 +277,17 @@ def send_continue_keystroke(reload_first: bool = True) -> bool:
                     time.sleep(0.4)
                     if user32.GetForegroundWindow() != hwnd:
                         continue
+                reloaded = True
 
-            ps_send = """
+            if text is None:
+                # Reload only. A terminal window has no reload to deliver.
+                if reloaded:
+                    return True
+                continue
+
+            ps_send = f"""
             Add-Type -AssemblyName System.Windows.Forms
-            [System.Windows.Forms.SendKeys]::SendWait("continue{ENTER}")
+            [System.Windows.Forms.SendKeys]::SendWait("{text}")
             """
             subprocess.run(
                 ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps_send],
@@ -227,6 +300,16 @@ def send_continue_keystroke(reload_first: bool = True) -> bool:
         pass
 
     return False
+
+
+def send_continue_keystroke(reload_first: bool = True) -> bool:
+    """Send reload (^r) and 'continue{ENTER}' to the OpenCode window."""
+    return _deliver_keystrokes(reload_first=reload_first, text="continue{ENTER}")
+
+
+def reload_opencode_window() -> bool:
+    """Reload the Desktop window only: drops a stale limit banner, types nothing."""
+    return _deliver_keystrokes(reload_first=True, text=None)
 
 
 _SESSION_ID_RE = re.compile(r"\bsessionID=(ses_[A-Za-z0-9]+)")
@@ -318,28 +401,43 @@ def _dispatch_cli_resume(oc: str, sess: tuple[str, str, str] | None) -> bool:
         return False
 
 
+RELOAD_HINT = "hint: chat still locked - press Reload"
+
+
 def resume_active_session(session_ids: list[str] | None = None) -> tuple[bool, str]:
-    """Resume OpenCode after a new IP: every given session, or the active one if none are known."""
+    """Resume OpenCode after a new IP: clear the lock, reload the window, then continue.
+
+    The reload is not optional. The Desktop banner and the disabled composer are
+    drawn from client state, so a CLI 'continue' alone leaves the user looking at
+    the error until they press Ctrl+R themselves.
+    """
     if not is_auto_resume_enabled():
         return False, "Auto-resume is disabled."
 
-    cleared = clear_opencode_free_limit()
-    details = []
+    details: list[str] = []
+    cleared = clear_opencode_free_limit(details)
     if cleared > 0:
         details.append(f"cleared {cleared} rate limit entries from database")
+
+    reloaded = reload_opencode_window()
+    details.append(
+        "reloaded the OpenCode window" if reloaded else "could not reload the OpenCode window"
+    )
 
     if session_ids:
         sent, notes = resume_sessions(session_ids)
         details.append(f"sent 'continue' to {sent} of {len(set(session_ids))} chat(s) that hit the limit")
         details.extend(notes)
         if sent:
+            if not reloaded:
+                details.append(RELOAD_HINT)
             return True, " | ".join(details)
         # Nothing could be sent that way: fall through to the active window.
 
     # Prefer the open Desktop window so the user sees the resumed session.
     # Only fall back to a detached CLI run when no window is available; running
     # both at once creates duplicate turns in the same session.
-    if send_continue_keystroke(reload_first=True):
+    if send_continue_keystroke(reload_first=not reloaded):
         details.append("sent reload and 'continue' to the OpenCode window")
         return True, " | ".join(details)
 
@@ -351,8 +449,8 @@ def resume_active_session(session_ids: list[str] | None = None) -> tuple[bool, s
             details.append(f"dispatched CLI continue to {target}")
             return True, " | ".join(details)
 
-    if cleared > 0:
+    if cleared > 0 or reloaded:
         return False, (
-            " | ".join(details) + " but no OpenCode window or session was available"
+            " | ".join(details) + " but no OpenCode window or session was available | " + RELOAD_HINT
         )
     return False, "No active session or window found to resume."
