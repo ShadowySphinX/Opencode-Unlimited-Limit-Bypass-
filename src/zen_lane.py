@@ -11,7 +11,6 @@ import time
 from ouc_common import (
     LANE_DIR,
     ensure_warp_mode,
-    ensure_warp_protocol,
     find_opencode_cli,
     find_opencode_desktop,
     find_warp_cli,
@@ -92,10 +91,6 @@ def _ensure_tunnel_up() -> bool:
     # same non-destructive repair the keeper uses before giving up.
     if not warp_registration_healthy(warp):
         repair_warp_registration(warp, 2)
-    try:
-        ensure_warp_protocol("wireguard", warp_bin=warp)
-    except Exception:
-        pass
     ensure_warp_mode(warp, scope)
     run_warp(["connect"], warp_bin=warp)
     for _ in range(10):

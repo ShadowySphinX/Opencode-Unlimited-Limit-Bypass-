@@ -1278,6 +1278,7 @@
         <div class="metric-sub">
           <span id="blacklistSummary">0 blacklisted /64s</span>
           <span id="lastHopText">Last hop: never</span>
+          <span id="lastDecisionText">Last decision: none yet</span>
         </div>
       </div>
     </section>
@@ -1598,20 +1599,23 @@
       text.appendChild(title);
       text.appendChild(detail);
       row.appendChild(text);
-      if (issue.fix) {
+      const actions = (issue.actions && issue.actions.length)
+        ? issue.actions
+        : (issue.fix ? [{ fix: issue.fix, label: issue.fix_label || "Fix it" }] : []);
+      actions.forEach((action) => {
         const btn = document.createElement("button");
         btn.className = "btn btn-sm" + (issue.level === "bad" ? " btn-danger" : "");
-        btn.textContent = issue.fix_label || "Fix it";
+        btn.textContent = action.label || "Fix it";
         btn.onclick = async () => {
           btn.disabled = true;
           try {
-            await runAction(null, () => window.pywebview.api.fix_issue(issue.fix));
+            await runAction(null, () => window.pywebview.api.fix_issue(action.fix));
           } finally {
             btn.disabled = false;
           }
         };
         row.appendChild(btn);
-      }
+      });
       list.appendChild(row);
     });
   }
@@ -1760,6 +1764,9 @@
     $("dbSummary").textContent = `${st.db.projects} projects • ${st.db.sessions} chats`;
     $("blacklistSummary").textContent = `${st.blacklist_count} blacklisted /64s`;
     $("lastHopText").textContent = `Last hop: ${formatTime(st.last_hop)}`;
+    if ($("lastDecisionText")) {
+      $("lastDecisionText").textContent = `Last decision: ${st.last_decision || "none yet"}`;
+    }
 
     // Controls & Switches
     setTag($("adminBadge"), sv.is_admin ? "Administrator" : "Standard User", sv.is_admin ? "ok" : "");

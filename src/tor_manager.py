@@ -7,10 +7,13 @@ import os
 import shutil
 import socket
 import subprocess
+import sys
 import tarfile
+import threading
 import time
 import urllib.request
 from pathlib import Path
+from typing import Any
 
 from ouc_common import (
     CREATE_NO_WINDOW,
@@ -121,6 +124,11 @@ def download_and_extract_tor() -> tuple[bool, str]:
     if existing_exe:
         return True, f"Tor already installed at {existing_exe}"
 
+    if sys.platform != "win32":
+        # The expert bundle published for this path is a Windows build, so a
+        # Linux/macOS download would only waste time and then fail to find tor.
+        return False, "Tor is not installed - install it with your package manager (e.g. apt install tor) and retry."
+
     bundle_urls = fetch_tor_bundle_url()
     tar_path = TOR_DIR / "tor-expert-bundle.tar.gz"
 
@@ -152,7 +160,11 @@ def download_and_extract_tor() -> tuple[bool, str]:
     if not extracted:
         try:
             with tarfile.open(tar_path, "r:gz") as t:
-                t.extractall(TOR_DIR)
+                try:
+                    t.extractall(TOR_DIR, filter="data")
+                except TypeError:
+                    # Python < 3.11.4 has no extraction filter.
+                    t.extractall(TOR_DIR)
             extracted = True
         except Exception as exc:
             return False, f"Failed to extract Tor archive: {exc}"
@@ -181,11 +193,47 @@ def is_portable_tor_running() -> bool:
         return False
 
 
+_TOR_START_LOCK = threading.RLock()
+# A fresh tor needs a few seconds to bootstrap; an older process whose SOCKS
+# port never opened is wedged, not slow, and may be replaced.
+TOR_BOOTSTRAP_GRACE = 120.0
+
+
+def _portable_tor_age() -> float | None:
+    try:
+        import psutil
+
+        pid = int(TOR_PID_FILE.read_text(encoding="utf-8").strip())
+        return max(0.0, time.time() - psutil.Process(pid).create_time())
+    except Exception:
+        return None
+
+
 def start_portable_tor() -> tuple[bool, str]:
     """Start the portable Tor process in the background."""
+    # Request threads, the guard and the dashboard can all decide Tor is down
+    # at the same moment; serializing the start keeps them from spawning two
+    # processes that fight over the same SOCKS port.
+    with _TOR_START_LOCK:
+        return _start_portable_tor_locked()
+
+
+def _start_portable_tor_locked() -> tuple[bool, str]:
     if test_socks5_alive(TOR_DEFAULT_SOCKS_PORT) or test_socks5_alive(TOR_BROWSER_SOCKS_PORT):
         target = get_active_tor_target()
-        return True, f"Tor SOCKS already running on {target[0]}:{target[1]}"
+        if target:
+            return True, f"Tor SOCKS already running on {target[0]}:{target[1]}"
+        return True, "Tor SOCKS port is already answering"
+
+    if is_portable_tor_running():
+        # The previous start is still bootstrapping. Spawning another tor here
+        # would make both processes fight over the same SOCKS port.
+        age = _portable_tor_age()
+        if age is None or age < TOR_BOOTSTRAP_GRACE:
+            return False, (
+                "Portable Tor is still starting up; its SOCKS port is not answering yet."
+            )
+        stop_portable_tor()
 
     exe = find_tor_exe()
     if not exe:
@@ -214,14 +262,15 @@ def start_portable_tor() -> tuple[bool, str]:
     ]
 
     try:
-        proc = subprocess.Popen(
-            args,
-            creationflags=CREATE_NO_WINDOW | DETACHED_PROCESS,
-            close_fds=True,
-        )
+        spawn: dict[str, Any] = {"close_fds": True}
+        if sys.platform == "win32":
+            spawn["creationflags"] = CREATE_NO_WINDOW | DETACHED_PROCESS
+        else:
+            spawn["start_new_session"] = True
+        proc = subprocess.Popen(args, **spawn)
         TOR_PID_FILE.write_text(str(proc.pid), encoding="utf-8")
     except Exception as exc:
-        return False, f"Failed to spawn tor.exe: {exc}"
+        return False, f"Failed to spawn tor: {exc}"
 
     # Wait for SOCKS port to open (up to 25s for first bootstrap)
     for _ in range(25):
@@ -242,6 +291,11 @@ def stop_portable_tor() -> tuple[bool, str]:
         proc = psutil.Process(pid)
         if "tor" in proc.name().lower():
             proc.kill()
+            try:
+                # Reap it before a replacement binds the same SOCKS port.
+                proc.wait(timeout=5.0)
+            except Exception:
+                pass
         TOR_PID_FILE.unlink(missing_ok=True)
         return True, f"Stopped portable Tor (PID {pid})."
     except Exception as exc:

@@ -37,6 +37,7 @@ KEEPER="${OUC_KEEPER_UNIT:-opencode-unlimited-keeper}"
 MODE="${OUC_WARP_MODE:-proxy}"
 
 COOLDOWN=75        # seconds between rotations (a rotation takes ~15s)
+WALL_RE='QuotaExceeded|quota_exceeded|FreeUsageLimitError|Free usage limit|usage limit reached|Rate limit|rate_limit|too many requests|status=429|"status":429|credits exhausted|free-tier usage'
 MAX_HOP_TRIES=4
 BLACKLIST_MAX=200  # blacklist cap; oldest entries are recycled when full
 
@@ -48,6 +49,26 @@ svc(){ sudo -n systemctl "$@" >/dev/null 2>&1; }
 w(){  sudo -n "$WARP" --accept-tos "$@" >/dev/null 2>&1 && return 0; sudo -n "$WARP" "$@" >/dev/null 2>&1; }
 wo(){ sudo -n "$WARP" --accept-tos "$@" 2>/dev/null && return 0; sudo -n "$WARP" "$@" 2>/dev/null; }
 
+set_mode(){
+  # Proxy mode is MASQUE-only on current WARP clients; TUN uses WireGuard.
+  if [ "$MODE" = "warp" ]; then
+    # Leave proxy mode before changing the protocol: a proxy client rejects
+    # the change while it is serving, so the order matters in this direction.
+    w mode warp
+    w tunnel protocol set "${OUC_WARP_PROTOCOL:-WireGuard}"
+  else
+    # A serving proxy client refuses a protocol change, so drop a proxy that
+    # drifted onto the wrong protocol before correcting it.
+    SETTINGS=$(wo settings 2>/dev/null || true)
+    if echo "$SETTINGS" | grep -qiE "mode[^:]*:[[:space:]]*proxy" && ! echo "$SETTINGS" | grep -qi masque; then
+      w disconnect
+    fi
+    w tunnel protocol set "${OUC_WARP_PROTOCOL:-MASQUE}"
+    w mode proxy
+    w proxy port 40000
+  fi
+}
+
 glog(){ echo "$(date '+%m-%d %H:%M:%S') $*" >> "$GUARD_LOG"; }
 
 state_get(){ python3 -c "
@@ -57,7 +78,7 @@ except: d={'blacklist':[],'offset':0,'last_hop':0,'hops':0,'current':''}
 print(d.get('$1',''))" 2>/dev/null; }
 
 state_set(){ python3 -c "
-import json,sys
+import ipaddress,json,sys
 try: d=json.load(open('$STATE'))
 except: d={'blacklist':[],'offset':0,'last_hop':0,'hops':0,'current':''}
 d['$1']=sys.argv[1]
@@ -91,29 +112,41 @@ cur_v6(){
   echo ""
 }
 
-m64(){ echo "$1" | cut -d: -f1-4; }
+m64(){ python3 - "$1" <<'PY' 2>/dev/null
+import ipaddress, sys
+try:
+    print(ipaddress.IPv6Network((ipaddress.IPv6Address(sys.argv[1]), 64), strict=False).network_address)
+except Exception:
+    print("")
+PY
+}
 
-# blacklist entries are /64-normalized (first 4 groups) so the same block
-# cannot return with a different interface ID and pass the check.
+# blacklist entries are /64-normalized so the same block cannot return with
+# a different interface ID (or compressed spelling) and pass the check.
 blacklist_add(){
   [ -n "$1" ] || return 0
   python3 - "$1" "$STATE" <<'PY' 2>/dev/null
-import json,sys
-def m64(a): return ":".join(a.split(":")[:4])
+import ipaddress,json,sys
+def m64(a):
+    try: return str(ipaddress.IPv6Network((ipaddress.IPv6Address(a), 64), strict=False).network_address)
+    except Exception: return ""
 p=sys.argv[2]
 try: d=json.load(open(p))
 except: d={"blacklist":[],"offset":0,"last_hop":0,"hops":0,"current":""}
 m=m64(sys.argv[1])
-d["blacklist"]=[x for x in d["blacklist"] if x and m64(x)!=m]+[m]
-d["blacklist"]=d["blacklist"][-200:]
+if m:
+    d["blacklist"]=[x for x in d["blacklist"] if x and m64(x)!=m]+[m]
+    d["blacklist"]=d["blacklist"][-200:]
 json.dump(d,open(p,"w"))
 PY
 }
 
 is_burnt(){
   python3 - "$1" "$STATE" <<'PY' 2>/dev/null
-import json,sys
-def m64(a): return ":".join(a.split(":")[:4])
+import ipaddress,json,sys
+def m64(a):
+    try: return str(ipaddress.IPv6Network((ipaddress.IPv6Address(a), 64), strict=False).network_address)
+    except Exception: return ""
 try: d=json.load(open(sys.argv[2]))
 except: sys.exit(1)
 m=m64(sys.argv[1])
@@ -133,13 +166,13 @@ keeper_resume(){
 
 hop_once(){
   # one non-destructive session rotation. prints the new IPv6 or empty.
-  local old="$1" v="" i
+  local old="$1" v=""
   keeper_pause
   w disconnect
 
   # Recreate a registration only when it is actually missing.
   if ! wo registration show >/dev/null 2>&1; then
-    for i in 1 2 3; do
+    for _ in 1 2 3; do
       w registration new && break
       sleep 4
     done
@@ -148,15 +181,10 @@ hop_once(){
   # rotate-keys keeps the device registration and renews the WireGuard
   # session, so Cloudflare assigns a new client /64.
   w tunnel rotate-keys
-  if [ "$MODE" = "warp" ]; then
-    w mode warp
-  else
-    w mode proxy
-    w proxy port 40000
-  fi
+  set_mode
   w connect
 
-  for i in $(seq 1 10); do
+  for _ in $(seq 1 10); do
     sleep 2
     v=$(cur_v6)
     case "$v" in
@@ -193,9 +221,16 @@ while true; do
   PREV_OFF="$OFF"
   NEWBYTES=$((SIZE - OFF))
   WALL=0
+  WALL_SID=""
   if [ "$NEWBYTES" -gt 0 ] && [ "$NEWBYTES" -lt 50000000 ]; then
-    if tail -c +"$((OFF + 1))" "$LOGF" 2>/dev/null | grep -E -aqi "QuotaExceeded|quota_exceeded|Free usage limit|usage limit reached|Rate limit|rate_limit|too many requests|status=429|\"status\":429|credits exhausted|free-tier usage"; then
+    NEW_TEXT=$(tail -c +"$((OFF + 1))" "$LOGF" 2>/dev/null)
+    if echo "$NEW_TEXT" | grep -E -aqi "$WALL_RE"; then
       WALL=1
+      # Resume the exact chat that hit the wall: `run --continue` is scoped to
+      # the guard's working directory and can land in a different project.
+      # Only the wall lines carry the session that was refused; other lines in
+      # the same chunk may name an unrelated session.
+      WALL_SID=$(echo "$NEW_TEXT" | grep -aiE "$WALL_RE" | grep -aioE 'sessionID=ses_[A-Za-z0-9]+' | tail -n 1 | cut -d= -f2)
     fi
   fi
   state_set offset "$SIZE"
@@ -242,8 +277,14 @@ for db in [Path.home() / '.config' / 'ai.opencode.desktop' / 'drafts.sqlite', Pa
 " 2>/dev/null || true
       sleep 2
       if command -v opencode >/dev/null 2>&1; then
-        nohup opencode run --continue "continue" >/dev/null 2>&1 &
-        glog "[auto-resume] sent 'continue' to active session"
+        RESUME_LOG="$STATE_DIR/auto-resume.log"
+        if [ -n "$WALL_SID" ]; then
+          nohup opencode run --session "$WALL_SID" "continue" >>"$RESUME_LOG" 2>&1 </dev/null &
+          glog "[auto-resume] sent 'continue' to $WALL_SID (log: $RESUME_LOG)"
+        else
+          nohup opencode run --continue "continue" >>"$RESUME_LOG" 2>&1 </dev/null &
+          glog "[auto-resume] sent 'continue' to the last session (no sessionID in wall line)"
+        fi
       fi
     else
       # Keep the wall pending so the next tick retries instead of losing it.

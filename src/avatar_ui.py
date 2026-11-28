@@ -37,6 +37,7 @@ from ouc_common import (
     BIN_DIR,
     CREATE_NO_WINDOW,
     DEST_DIR,
+    GUARD_AUDIT_FILE,
     GUARD_LOG_FILE,
     GUARD_STATE_FILE,
     KEEPER_LOG_FILE,
@@ -55,7 +56,6 @@ from ouc_common import (
     find_warp_cli,
     get_egress_ip,
     get_warp_local_v6,
-    hop_once,
     hop_report,
     is_admin,
     is_cloudflare_v6,
@@ -115,6 +115,9 @@ HEARTBEAT_STALE = 240.0
 AUTO_REPAIR_FILE = LANE_DIR / "auto_repair.json"
 AUTO_REPAIR_LOG = LANE_DIR / "auto_repair.log"
 AUTO_REPAIR_TICK = 25.0
+# One failed probe is a blip; a rotation nobody asked for looks like a bug, so
+# the repair loop waits for a second consecutive failure.
+AUTO_REPAIR_PROBE_STREAK = 2
 AUTO_REPAIR_MAX_PER_HOUR = 6
 AUTO_REPAIR_COOLDOWNS = {
     "start_keeper": 120.0,
@@ -200,9 +203,8 @@ def _heartbeat_age(path: Path) -> float | None:
 def _probe_http(url: str, proxy: str | None, timeout: float = PROBE_TIMEOUT) -> tuple[bool, str]:
     """Make one real HTTPS request. Returns (reached, stage).
 
-    Any HTTP answer (even 403/429) proves DNS, TCP, TLS and the tunnel work;
-    only transport errors count as failures. Stage is one of: ok, proxy,
-    timeout, upstream.
+    Explicit inference overload proves reachability, unlike a generic gateway
+    failure. Stage is one of: ok, overloaded, proxy, timeout, upstream.
     """
     handlers = [urllib.request.ProxyHandler({"http": proxy, "https": proxy} if proxy else {})]
     opener = urllib.request.build_opener(*handlers)
@@ -220,9 +222,13 @@ def _probe_http(url: str, proxy: str | None, timeout: float = PROBE_TIMEOUT) -> 
         return True, "ok"
     except urllib.error.HTTPError as exc:
         try:
-            exc.close()
+            body = exc.read(4096).decode("utf-8", errors="replace")
+            if exc.code in (429, 503) and _OVERLOAD_RE.search(body):
+                return True, "overloaded"
         except Exception:
             pass
+        finally:
+            exc.close()
         return (False, "upstream") if exc.code in (407, 502, 503, 504) else (True, "ok")
     except Exception as exc:
         text = str(getattr(exc, "reason", exc)).lower()
@@ -249,6 +255,19 @@ def _tail_lines(path: Path, count: int = 75) -> list[str]:
         return []
 
 
+def _tail_audit(count: int = 8) -> list[dict]:
+    """The newest guard audit records, newest last."""
+    records: list[dict] = []
+    for line in _tail_lines(GUARD_AUDIT_FILE, count):
+        try:
+            item = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(item, dict):
+            records.append(item)
+    return records
+
+
 # EPIPE is deliberately absent: OpenCode reports a closed stdout/stderr pipe as
 # "Error: EPIPE: broken pipe, write" with role=cli, which is local and must not
 # raise the network banner. Upstream write failures still carry fetch failed,
@@ -260,9 +279,10 @@ _NET_ERROR_RE = re.compile(
     re.IGNORECASE,
 )
 _UPSTREAM_503_RE = re.compile(
-    r"AI_APICallError|statusCode[=:\s]+503|Request failed with status 503",
+    r"statusCode[=:\s]+503|Request failed with status 503",
     re.IGNORECASE,
 )
+_OVERLOAD_RE = re.compile(r"inference service is overloaded", re.IGNORECASE)
 _LOG_TS_RE = re.compile(r"^timestamp=(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})")
 
 
@@ -272,10 +292,22 @@ def _recent_network_errors(lines: list[str], max_age: float = 600.0) -> list[str
     OpenCode's own ``http.status=503`` replies are not upstream failures, so
     the match list is limited to transport errors and provider 503s.
     """
+    return _recent_matching_errors(
+        [line for line in lines if not _OVERLOAD_RE.search(line)],
+        re.compile(f"{_NET_ERROR_RE.pattern}|{_UPSTREAM_503_RE.pattern}", re.IGNORECASE),
+        max_age,
+    )
+
+
+def _recent_overload_errors(lines: list[str], max_age: float = 600.0) -> list[str]:
+    return _recent_matching_errors(lines, _OVERLOAD_RE, max_age)
+
+
+def _recent_matching_errors(lines: list[str], pattern: re.Pattern, max_age: float) -> list[str]:
     cutoff = time.time() - max_age
     found: list[str] = []
     for line in lines:
-        if not (_NET_ERROR_RE.search(line) or _UPSTREAM_503_RE.search(line)):
+        if not pattern.search(line):
             continue
         stamp = _LOG_TS_RE.match(line)
         if not stamp:
@@ -328,18 +360,25 @@ def _find_pythonw() -> str | None:
     return None
 
 
+def _is_ascii(text: str) -> bool:
+    try:
+        text.encode("ascii")
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
 def _write_cmd_wrapper(path: Path, content: str) -> None:
     """Write a .cmd shim, switching to UTF-8 when a path holds non-ASCII text.
 
-    cmd.exe reads batch files in the active console code page, so a UTF-8 shim
-    needs ``chcp 65001`` before the first non-ASCII line. ASCII shims keep the
-    plain fast path and leave the console code page alone.
+    cmd.exe reads batch files in the active console code page, so a shim whose
+    content or install path holds non-ASCII text needs ``chcp 65001`` before the
+    first non-ASCII line. ASCII shims keep the plain fast path and leave the
+    console code page alone.
     """
-    try:
+    if _is_ascii(content) and _is_ascii(str(path)):
         path.write_bytes(content.encode("ascii"))
         return
-    except UnicodeEncodeError:
-        pass
 
     lines = content.split("\r\n")
     if lines and lines[0].lower().startswith("@echo off"):
@@ -481,6 +520,7 @@ class AvatarControlApi:
         self._probe_ts = 0.0
         self._repair_lock = threading.Lock()
         self._repair_last: dict[str, float] = {}
+        self._probe_fail_streak = 0
         self._repair_actions: list[dict] = []
         self._repair_status = "Watching for connection problems"
         self._repair_enabled = self._load_repair_setting()
@@ -550,9 +590,15 @@ class AvatarControlApi:
         elif mode in ("warp", "clean") and services["proxy_listening"] and not warp["rotating"]:
             code = probe.get("code", "")
             failing = proxy.get("fallback_active") or code in ("upstream", "timeout")
-            if failing:
-                last_hop = self._repair_last.get("hop", 0.0)
-                if proxy.get("fallback_active") and now - last_hop > 600.0 and proxy.get("errors_5m", 0) >= 4:
+            streak = int(getattr(self, "_probe_fail_streak", 0) or 0) + 1 if failing else 0
+            self._probe_fail_streak = streak
+            if failing and streak >= AUTO_REPAIR_PROBE_STREAK:
+                last_hop = self._repair_last.get("hop")
+                if (
+                    proxy.get("fallback_active")
+                    and (last_hop is None or now - last_hop > 600.0)
+                    and proxy.get("errors_5m", 0) >= 4
+                ):
                     action, reason = "repair_warp", "The tunnel kept failing after an edge change"
                 else:
                     action, reason = "hop", "The local proxy could not reach opencode.ai"
@@ -561,8 +607,11 @@ class AvatarControlApi:
             return
 
         with self._repair_lock:
-            last = self._repair_last.get(action, 0.0)
-            if now - last < AUTO_REPAIR_COOLDOWNS.get(action, 300.0):
+            # time.monotonic() counts from boot, not from process start, so a
+            # default of 0.0 would suppress the first repair for the cooldown
+            # window on a freshly started machine.
+            last = self._repair_last.get(action)
+            if last is not None and now - last < AUTO_REPAIR_COOLDOWNS.get(action, 300.0):
                 return
             self._repair_last[action] = now
 
@@ -694,7 +743,7 @@ class AvatarControlApi:
                 else:
                     reached, stage = _probe_http(PROBE_URL, proxy)
                     if reached:
-                        code = "ok"
+                        code = stage
                     else:
                         direct_ok, _ = _probe_http(PROBE_DIRECT_URL, None, timeout=5.0)
                         code = stage if direct_ok else "offline"
@@ -703,7 +752,7 @@ class AvatarControlApi:
             finally:
                 with self._probe_lock:
                     self._probe = {
-                        "ok": code == "ok",
+                        "ok": code in ("ok", "overloaded"),
                         "code": code,
                         "ms": int((time.time() - started) * 1000),
                         "ts": int(time.time()),
@@ -838,6 +887,16 @@ class AvatarControlApi:
                 "last_hop": int(guard_state.get("last_hop", 0) or 0),
                 "failed_hops": int(guard_state.get("failed_hops", 0) or 0),
                 "backoff_until": int(guard_state.get("backoff_until", 0) or 0),
+                "retry_level": int(guard_state.get("retry_level", 0) or 0),
+                # One line that answers "why did it rotate / why did it not".
+                "last_decision": str(guard_state.get("last_decision", "") or ""),
+                "last_decision_at": int(guard_state.get("last_decision_at", 0) or 0),
+                # The app's own "wait until HH:MM" hint, shown but never obeyed.
+                "client_lock_until": int(guard_state.get("client_lock_until", 0) or 0),
+                "last_verdict": str(guard_state.get("last_verdict", "") or ""),
+                "verdict_at": int(guard_state.get("verdict_at", 0) or 0),
+                "soft_pending": len(guard_state.get("soft_pending") or {}),
+                "audit": _tail_audit(8),
                 "db": _read_db_stats(),
                 "log_size_bytes": log_size,
             },
@@ -866,6 +925,9 @@ class AvatarControlApi:
             probe=probe,
             guard_backoff=int(guard_state.get("backoff_until", 0) or 0),
             guard_free_wall=int(guard_state.get("free_wall_until", 0) or 0),
+            client_lock_until=int(guard_state.get("client_lock_until", 0) or 0),
+            last_verdict=str(guard_state.get("last_verdict", "") or ""),
+            retry_level=int(guard_state.get("retry_level", 0) or 0),
             keeper_heartbeat=keeper_hb,
             guard_heartbeat=guard_hb,
             desktop_installed=bool(desktop_path),
@@ -873,6 +935,7 @@ class AvatarControlApi:
             path_wired=state["lane"]["path_wired"],
             proxy=proxy,
             net_errors=recent_errors,
+            overload_errors=_recent_overload_errors(opencode_lines),
         )
         return state
 
@@ -891,6 +954,9 @@ class AvatarControlApi:
         probe: dict | None = None,
         guard_backoff: int = 0,
         guard_free_wall: int = 0,
+        client_lock_until: int = 0,
+        last_verdict: str = "",
+        retry_level: int = 0,
         keeper_heartbeat: float | None = None,
         guard_heartbeat: float | None = None,
         desktop_installed: bool = False,
@@ -898,14 +964,32 @@ class AvatarControlApi:
         path_wired: bool = False,
         proxy: dict | None = None,
         net_errors: list[str] | None = None,
+        overload_errors: list[str] | None = None,
     ) -> dict:
         """Summarise the live state as a short list of plain-language problems with one-click fixes."""
         issues: list[dict] = []
         proxy = proxy or {}
         net_errors = net_errors or []
 
-        def add(level: str, title: str, detail: str, fix: str | None = None, fix_label: str = "Fix it") -> None:
-            issues.append({"level": level, "title": title, "detail": detail, "fix": fix, "fix_label": fix_label})
+        def add(
+            level: str,
+            title: str,
+            detail: str,
+            fix: str | None = None,
+            fix_label: str = "Fix it",
+            actions: list[dict] | None = None,
+        ) -> None:
+            issue: dict = {"level": level, "title": title, "detail": detail}
+            if actions:
+                issue["actions"] = [
+                    {"fix": str(item["fix"]), "label": str(item.get("label") or "Fix it")}
+                    for item in actions
+                    if isinstance(item, dict) and item.get("fix")
+                ]
+            else:
+                issue["fix"] = fix
+                issue["fix_label"] = fix_label
+            issues.append(issue)
 
         mode = egress.get("mode", "warp")
         if not installed:
@@ -984,6 +1068,13 @@ class AvatarControlApi:
             )
 
         code = (probe or {}).get("code", "")
+        if overload_errors or code == "overloaded":
+            add(
+                "warn",
+                "The inference provider reports overload",
+                "Allow OpenCode's existing retry to finish, retry later, or select another model/provider. "
+                "Rotating WARP or repairing the route does not increase provider capacity.",
+            )
         fallback_active = bool(proxy.get("fallback_active"))
         if proxy_listening and fallback_active:
             route = {
@@ -1088,6 +1179,44 @@ class AvatarControlApi:
                 "Try now",
             )
 
+        if client_lock_until and client_lock_until > time.time():
+            wait_at = time.strftime("%H:%M", time.localtime(client_lock_until))
+            add(
+                "warn",
+                f"OpenCode is showing 'wait until {wait_at}'",
+                "That countdown is a client-side hint written after a failed request, and requests "
+                "can still go through while it sits on screen. The guard clears the lock, tries the "
+                "chat once and only spends a new address if that attempt fails. Try it yourself, or "
+                "just reload the window to drop the banner without sending anything.",
+                actions=[
+                    {"fix": "retry-chat", "label": "Retry chat now"},
+                    {"fix": "reload-chat", "label": "Reload chat"},
+                ],
+            )
+
+        try:
+            from zen_guard import RETRY_STEPS
+
+            cap_minutes = RETRY_STEPS[-1] // 60
+            at_cap = retry_level >= len(RETRY_STEPS) - 1
+        except Exception:
+            cap_minutes, at_cap = 10, False
+
+        if last_verdict == "still walled" and at_cap:
+            add(
+                "warn",
+                "The allowance is following your account, not your address",
+                "A confirmed new IPv6 address went straight back to the free limit, and so did the "
+                "one cheap retry the guard sends before rotating. Reconnecting WARP cannot refill a "
+                "per-account allowance: switch model with /models, connect an account with quota "
+                "with /connect, or add another account to the pool. The guard keeps retrying every "
+                f"{cap_minutes} minutes on its own.",
+                actions=[
+                    {"fix": "retry-chat", "label": "Retry chat now"},
+                    {"fix": "hop", "label": "Try new address"},
+                ],
+            )
+
         brand_state = _desktop_brand_state()
         if brand_state.get("supported") and not brand_state.get("patched"):
             add(
@@ -1167,6 +1296,41 @@ class AvatarControlApi:
             return self.repair_warp_connection()
         if action == "hop":
             return self.hop_now()
+        if action == "retry-chat":
+            # The same low-cost repair the guard tries first: drop the client
+            # lock and send one 'continue', without spending an address.
+            try:
+                from auto_resume import clear_opencode_free_limit, send_continue_keystroke
+            except Exception as exc:
+                return {"ok": False, "message": f"Auto-resume is not available ({exc})."}
+            cleared = 0
+            try:
+                cleared = clear_opencode_free_limit()
+            except Exception:
+                pass
+            self._clear_soft_state()
+            if send_continue_keystroke(reload_first=True):
+                return {
+                    "ok": True,
+                    "message": (
+                        f"Cleared {cleared} lock row(s), reloaded the window and sent 'continue'. "
+                        "No IP was spent - if the chat still shows the limit, rotate instead."
+                    ),
+                }
+            return {
+                "ok": False,
+                "message": (
+                    f"Cleared {cleared} lock row(s), but no OpenCode window accepted the keystroke. "
+                    "Open the chat and press Retry again."
+                ),
+            }
+        if action == "reload-chat":
+            try:
+                from auto_resume import reload_opencode_window
+            except Exception as exc:
+                return {"ok": False, "message": f"Auto-resume is not available ({exc})."}
+            if reload_opencode_window():
+                return {"ok": True, "message": "OpenCode was reloaded - the wait banner should be gone."}
         if action == "fix_port":
             return self.fix_opencode_service()
         if action == "start_tor":
@@ -1302,11 +1466,6 @@ class AvatarControlApi:
         if warp and changed:
             if not warp_registration_healthy(warp):
                 repair_warp_registration(warp, 3)
-            try:
-                from ouc_common import ensure_warp_protocol
-                ensure_warp_protocol("wireguard", warp_bin=warp)
-            except Exception:
-                pass
             ensure_warp_mode(warp, clean_scope)
             run_warp(["connect"], warp_bin=warp)
             connected = False
@@ -1352,11 +1511,6 @@ class AvatarControlApi:
                 scope = current.get("warp_scope", default_scope)
                 if not warp_registration_healthy(warp):
                     repair_warp_registration(warp, 3)
-                try:
-                    from ouc_common import ensure_warp_protocol
-                    ensure_warp_protocol("wireguard", warp_bin=warp)
-                except Exception:
-                    pass
                 ensure_warp_mode(warp, scope)
                 run_warp(["connect"], warp_bin=warp)
                 connected = False
@@ -1483,6 +1637,61 @@ class AvatarControlApi:
             self._egress_v6 = ""
         return {"ok": rc == 0, "message": "WARP disconnected." if rc == 0 else msg}
 
+    def _clear_soft_state(self) -> None:
+        """Forget the client-lock hint and the soft-retry bookkeeping.
+
+        A manual retry or deep reset is an explicit "start over": keeping a
+        stale retry counter would suppress the guard's own next attempt.
+        """
+        if not GUARD_STATE_FILE.is_file():
+            return
+        try:
+            state = json.loads(GUARD_STATE_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            return
+        if not isinstance(state, dict):
+            return
+        state.update(
+            {
+                "client_lock_until": 0,
+                "client_lock_keys": {},
+                "client_lock_at": 0,
+                "soft_pending": {},
+                "soft_retry": {},
+                "resume_verify": {},
+                "last_verdict": "",
+                "verdict_at": 0,
+            }
+        )
+        try:
+            GUARD_STATE_FILE.write_text(json.dumps(state), encoding="utf-8")
+        except Exception:
+            pass
+
+    def _record_manual_hop(self, old_addr: str, new_addr: str, source: str) -> None:
+        """Write a manual rotation through the guard's own recorder."""
+        try:
+            from zen_guard import record_hop
+        except Exception:
+            return
+        state: dict = {}
+        if GUARD_STATE_FILE.is_file():
+            try:
+                state = json.loads(GUARD_STATE_FILE.read_text(encoding="utf-8"))
+            except Exception:
+                state = {}
+        record_hop(state, old_addr, new_addr, source=source, clear_pauses=True)
+
+    def _unlock_after_rotation(self) -> str:
+        """Clear the client lock and continue the chats after a manual rotation."""
+        try:
+            from auto_resume import resume_active_session
+
+            _ok, msg = resume_active_session(None)
+            return msg
+        except Exception as exc:
+            return f"unlock note: {exc}"
+
     def hop_now(self) -> dict:
         if not self._action_lock.acquire(blocking=False):
             return {"ok": False, "message": "Another rotation or setup action is already running."}
@@ -1496,11 +1705,17 @@ class AvatarControlApi:
                 from tor_manager import rotate_tor_circuit
                 ok, msg = rotate_tor_circuit()
                 self._refresh_egress_async(force=True)
+                if ok:
+                    self._record_manual_hop("", "", "manual-tor")
+                    msg = f"{msg} | {self._unlock_after_rotation()}"
                 return {"ok": ok, "message": msg}
             if mode == "custom":
                 from proxy_chain import rotate_custom_proxy
                 ok, msg = rotate_custom_proxy()
                 self._refresh_egress_async(force=True)
+                if ok:
+                    self._record_manual_hop("", "", "manual-custom")
+                    msg = f"{msg} | {self._unlock_after_rotation()}"
                 return {"ok": ok, "message": msg}
 
             warp = find_warp_cli()
@@ -1542,25 +1757,13 @@ class AvatarControlApi:
                 ov = "auto"
             if ov == "auto":
                 (LANE_DIR / "edge_reroll").write_text(str(time.time()), encoding="utf-8")
-            # Record hop in state.json
-            if GUARD_STATE_FILE.is_file():
-                try:
-                    st = json.loads(GUARD_STATE_FILE.read_text(encoding="utf-8"))
-                except Exception:
-                    st = {}
-            else:
-                st = {}
-            st["hops"] = int(st.get("hops", 0) or 0) + 1
-            st["last_hop"] = int(time.time())
-            st["current"] = new_v6
-            # A manual rotation is an explicit request to try again now.
-            st["failed_hops"] = 0
-            st["backoff_until"] = 0
-            st["hop_counted"] = 0
-            GUARD_STATE_FILE.write_text(json.dumps(st), encoding="utf-8")
+            # The same recorder the guard uses: last_ok_hop, pauses and the
+            # audit line all have to agree, whether the user or the guard rotated.
+            self._record_manual_hop(old_v6, new_v6, "manual")
             old_p = normalize_v6_64(old_v6) or "?"
             new_p = normalize_v6_64(new_v6) or new_v6
-            return {"ok": True, "message": f"Rotated /64: {old_p} -> {new_p}"}
+            unlock = self._unlock_after_rotation()
+            return {"ok": True, "message": f"Rotated /64: {old_p} -> {new_p} | {unlock}"}
         finally:
             self._action_lock.release()
 
@@ -1825,12 +2028,6 @@ class AvatarControlApi:
             except Exception:
                 pass
 
-            try:
-                from ouc_common import ensure_warp_protocol
-                ensure_warp_protocol("wireguard", warp_bin=wb)
-            except Exception:
-                pass
-
             if not warp_registration_healthy(wb):
                 if not repair_warp_registration(wb, 3):
                     return {
@@ -1936,8 +2133,9 @@ class AvatarControlApi:
         if fl_cleared > 0:
             cleared.append(f"{fl_cleared} limit entries")
 
-        # Clear guard blacklist and reset edge override
+        # Clear guard blacklist, the client-lock hint and the soft-retry counters
         self.clear_blacklist()
+        self._clear_soft_state()
         self.set_edge_override("auto")
 
         rot_msg = ""
@@ -1954,13 +2152,14 @@ class AvatarControlApi:
                 from ouc_common import find_warp_cli, hop_once
                 wbin = find_warp_cli()
                 if wbin:
+                    old_ip = self._egress_v6
                     with keeper_pause_ctx("avatar-ui-deep-reset", seconds=300):
-                        new_ip = hop_once(wbin, previous=self._egress_v6)
-                    rot_msg = (
-                        f"Rotated WARP IP: {new_ip}"
-                        if new_ip
-                        else "WARP reconnect failed"
-                    )
+                        new_ip = hop_once(wbin, previous=old_ip)
+                    if new_ip:
+                        self._record_manual_hop(old_ip, new_ip, "deep-reset")
+                        rot_msg = f"Rotated WARP IP: {new_ip} | {self._unlock_after_rotation()}"
+                    else:
+                        rot_msg = "WARP reconnect failed"
         except Exception as exc:
             rot_msg = f"Rotation note: {exc}"
 
@@ -1977,6 +2176,8 @@ class AvatarControlApi:
         except Exception:
             st = {}
         st["blacklist"] = []
+        # A day map left behind would keep treating a cleared block as burnt.
+        st["blacklist_day"] = {}
         GUARD_STATE_FILE.write_text(json.dumps(st), encoding="utf-8")
         return {"ok": True, "message": "Cleared /64 blacklist."}
 

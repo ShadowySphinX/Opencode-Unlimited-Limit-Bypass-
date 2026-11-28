@@ -34,6 +34,53 @@ EXPORT = [
 
 
 class AccountListTests(unittest.TestCase):
+    def test_the_cli_runs_through_the_cross_platform_helper(self) -> None:
+        # The old path passed creationflags directly, which raises ValueError on
+        # Linux and turned every wall into "guard error" instead of a switch.
+        completed = mock.Mock(returncode=0, stdout="[]")
+
+        with mock.patch.object(
+            account_pool, "find_opencode_cli", return_value="/usr/bin/opencode"
+        ), mock.patch.object(
+            account_pool, "run_hidden", return_value=completed
+        ) as run:
+            result = account_pool._run(["export"], 5.0)
+
+        self.assertIs(result, completed)
+        run.assert_called_once_with(
+            ["/usr/bin/opencode", "auth", "export"], timeout=5.0
+        )
+
+    def test_a_cmd_shim_is_run_through_cmd_exe(self) -> None:
+        completed = mock.Mock(returncode=0, stdout="[]")
+        shim = r"C:\Users\user\AppData\Roaming\npm\opencode.cmd"
+
+        with mock.patch.object(
+            account_pool, "find_opencode_cli", return_value=shim
+        ), mock.patch.object(
+            account_pool, "run_hidden", return_value=completed
+        ) as run:
+            account_pool._run(["switch", "opencode", "cred_b"], 5.0)
+
+        command = run.call_args.args[0]
+        # COMSPEC is an absolute path on Windows, so compare the name only.
+        self.assertIn("cmd.exe", command[0].lower())
+        self.assertEqual(command[1], "/c")
+        self.assertEqual(command[2], shim)
+        self.assertEqual(command[3:], ["auth", "switch", "opencode", "cred_b"])
+
+    def test_a_missing_cli_is_not_an_error(self) -> None:
+        with mock.patch.object(account_pool, "find_opencode_cli", return_value=None):
+            self.assertIsNone(account_pool._run(["export"], 5.0))
+
+    def test_a_spawn_failure_is_not_an_error(self) -> None:
+        with mock.patch.object(
+            account_pool, "find_opencode_cli", return_value="/usr/bin/opencode"
+        ), mock.patch.object(
+            account_pool, "run_hidden", side_effect=OSError("boom")
+        ):
+            self.assertIsNone(account_pool._run(["export"], 5.0))
+
     def test_only_gateway_accounts_are_listed(self) -> None:
         proc = mock.Mock(returncode=0, stdout=json.dumps(EXPORT))
 
@@ -98,6 +145,21 @@ class GuardAccountSwitchTests(unittest.TestCase):
         self.state_file.write_text(json.dumps(state), encoding="utf-8")
         return state
 
+    @staticmethod
+    def _pool() -> tuple[list[dict], object]:
+        """A two-account pool plus a switch() that really flips the active flag."""
+        accounts = [
+            {"id": "cred_a", "label": "Personal", "active": True},
+            {"id": "cred_b", "label": "Work", "active": False},
+        ]
+
+        def _switch(target: str) -> bool:
+            for item in accounts:
+                item["active"] = item["id"] == target
+            return True
+
+        return accounts, _switch
+
     def test_a_fresh_account_replaces_the_burned_one(self) -> None:
         state = self.state(
             backoff_until=self.now + 3600,
@@ -105,28 +167,47 @@ class GuardAccountSwitchTests(unittest.TestCase):
             free_wall_hops=2,
             pending={"ses_a": self.now - 30},
         )
+        accounts, switch_side_effect = self._pool()
+
+        with mock.patch.object(zen_guard.account_pool, "accounts", return_value=accounts), \
+                mock.patch.object(
+                    zen_guard.account_pool, "switch", side_effect=switch_side_effect
+                ) as switch, \
+                mock.patch.object(zen_guard, "_dispatch_auto_resume") as resume, \
+                mock.patch.object(zen_guard, "time") as fake_time:
+            fake_time.time.return_value = float(self.now)
+            switched = zen_guard._switch_account(state, self.now)
+
+        self.assertTrue(switched)
+        switch.assert_called_once_with("cred_b")
+        resume.assert_called_once()
+        saved = json.loads(self.state_file.read_text(encoding="utf-8"))
+        # The account we left is not condemned yet: a wall inside the window
+        # is what marks it spent.
+        self.assertEqual(saved["accounts_burned"], {})
+        self.assertEqual(saved["switch_pending"], {"account": "cred_a", "at": self.now})
+        self.assertEqual(saved["backoff_until"], 0)
+        self.assertEqual(saved["free_wall_until"], 0)
+        self.assertEqual(saved["last_ok_hop"], self.now)
+        self.assertEqual(saved["account_switches"], 1)
+
+    def test_a_switch_the_client_did_not_take_is_not_reported_as_done(self) -> None:
+        state = self.state(free_wall_hops=2)
         accounts = [
             {"id": "cred_a", "label": "Personal", "active": True},
             {"id": "cred_b", "label": "Work", "active": False},
         ]
 
         with mock.patch.object(zen_guard.account_pool, "accounts", return_value=accounts), \
-                mock.patch.object(zen_guard.account_pool, "switch", return_value=True) as switch, \
-                mock.patch.object(zen_guard, "_dispatch_auto_resume") as resume, \
-                mock.patch.object(zen_guard, "time") as fake_time:
-            fake_time.time.return_value = float(self.now)
-            switched = zen_guard._switch_account(state, self.now)
-            expected_day = zen_guard._utc_day()
+                mock.patch.object(zen_guard.account_pool, "switch", return_value=True), \
+                mock.patch.object(zen_guard, "_dispatch_auto_resume") as resume:
+            self.assertFalse(zen_guard._switch_account(state, self.now))
 
-        self.assertTrue(switched)
-        switch.assert_called_once_with("cred_b")
-        resume.assert_called_once()
-        saved = json.loads(self.state_file.read_text(encoding="utf-8"))
-        self.assertEqual(saved["accounts_burned"], {"cred_a": expected_day})
-        self.assertEqual(saved["backoff_until"], 0)
-        self.assertEqual(saved["free_wall_until"], 0)
-        self.assertEqual(saved["last_ok_hop"], self.now)
-        self.assertEqual(saved["account_switches"], 1)
+        resume.assert_not_called()
+        self.assertEqual(state["switch_pending"], {})
+        self.assertIn(
+            "did not take effect", self.log_file.read_text(encoding="utf-8")
+        )
 
     def test_every_account_burned_leaves_the_ip_path_alone(self) -> None:
         today = zen_guard._utc_day()
@@ -145,16 +226,26 @@ class GuardAccountSwitchTests(unittest.TestCase):
 
     def test_yesterdays_burn_does_not_block_today(self) -> None:
         state = self.state(accounts_burned={"cred_b": zen_guard._utc_day() - 1})
-        accounts = [
-            {"id": "cred_a", "label": "Personal", "active": True},
-            {"id": "cred_b", "label": "Work", "active": False},
-        ]
+        accounts, switch_side_effect = self._pool()
 
         with mock.patch.object(zen_guard.account_pool, "accounts", return_value=accounts), \
-                mock.patch.object(zen_guard.account_pool, "switch", return_value=True), \
+                mock.patch.object(zen_guard.account_pool, "switch", side_effect=switch_side_effect), \
                 mock.patch.object(zen_guard, "_dispatch_auto_resume"):
             state["accounts_burned"] = {"cred_b": zen_guard._utc_day() - 1}
             self.assertTrue(zen_guard._switch_account(state, self.now))
+
+    def test_corrupt_burn_state_does_not_stop_the_switch(self) -> None:
+        state = self.state(accounts_burned={"cred_b": "yesterday-ish", "junk": None})
+        accounts, switch_side_effect = self._pool()
+
+        with mock.patch.object(zen_guard.account_pool, "accounts", return_value=accounts), \
+                mock.patch.object(
+                    zen_guard.account_pool, "switch", side_effect=switch_side_effect
+                ) as switch, \
+                mock.patch.object(zen_guard, "_dispatch_auto_resume"):
+            self.assertTrue(zen_guard._switch_account(state, self.now))
+
+        switch.assert_called_once_with("cred_b")
 
     def test_one_account_is_not_a_pool(self) -> None:
         state = self.state()

@@ -15,6 +15,7 @@ import sys
 import threading
 import time
 import urllib.request
+from typing import Any
 from pathlib import Path
 from typing import Iterator
 
@@ -44,6 +45,7 @@ LANE_DIR = DEST_DIR / "lane"
 PAUSE_FILE = DEST_DIR / "keeper.pause"
 GUARD_STATE_FILE = GUARD_DIR / "state.json"
 GUARD_LOG_FILE = GUARD_DIR / "guard.log"
+GUARD_AUDIT_FILE = GUARD_DIR / "guard_audit.jsonl"
 KEEPER_LOG_FILE = KEEPER_DIR / "keeper.log"
 OPENCODE_LOG_FILE = Path.home() / ".local" / "share" / "opencode" / "log" / "opencode.log"
 
@@ -136,14 +138,19 @@ def run_hidden(
     timeout: float = 15.0,
 ) -> subprocess.CompletedProcess[str]:
     """Run a subprocess without spawning a visible console window on Windows."""
-    kwargs: dict[str, object] = {}
+    kwargs: dict[str, Any] = {}
     if sys.platform == "win32":
         kwargs["creationflags"] = CREATE_NO_WINDOW
     return subprocess.run(
         args,
         capture_output=True,
         text=True,
+        # warp-cli and opencode print UTF-8 while a Windows console defaults to
+        # a legacy code page; a strict locale decode would raise on non-ASCII.
+        encoding="utf-8",
+        errors="replace",
         timeout=timeout,
+        stdin=subprocess.DEVNULL,
         **kwargs,
     )
 
@@ -195,30 +202,30 @@ def find_opencode_cli() -> str | None:
     appdata = Path(os.environ.get("APPDATA", Path.home() / "AppData" / "Roaming"))
     cli_dir = appdata / "ai.opencode.desktop" / "cli"
     if cli_dir.is_dir():
-        found: list[Path] = []
+        paths: list[Path] = []
         for p in cli_dir.rglob("opencode-cli.exe"):
             try:
                 if p.is_file():
-                    found.append(p)
+                    paths.append(p)
             except OSError:
                 pass
-        if found:
-            return str(max(found, key=lambda p: p.stat().st_mtime))
+        if paths:
+            return str(max(paths, key=lambda p: p.stat().st_mtime))
 
     for candidate in _OPENCODE_CANDIDATES:
         if candidate.is_file():
             return str(candidate)
 
     for name in ("opencode.exe", "opencode"):
-        found = shutil.which(name)
-        if not found:
+        hit = shutil.which(name)
+        if not hit:
             continue
-        low = found.lower()
+        low = hit.lower()
         if BRAND in low or "opencode-infinite" in low or "unlimited" in low:
             continue
         if "ai.opencode.desktop" in low and not low.endswith("opencode-cli.exe"):
             continue
-        return found
+        return hit
     return None
 
 
@@ -354,11 +361,14 @@ def warp_mode(warp_bin: str | None = None) -> str:
             return cached[1]
 
     mode = ""
-    rc, out = run_warp(["-j", "settings", "list"], warp_bin=warp_bin, timeout=6.0)
+    rc, out = run_warp(["-j", "settings"], warp_bin=warp_bin, timeout=6.0)
     if rc == 0 and "{" in out:
         try:
             data = json.loads(out[out.find("{"): out.rfind("}") + 1])
-            op = data.get("settings", {}).get("operation_mode") or data.get("operation_mode")
+            settings = data.get("settings")
+            if not isinstance(settings, dict):
+                settings = data
+            op = settings.get("operation_mode")
             if isinstance(op, str):
                 mode = op
             elif isinstance(op, dict):
@@ -385,12 +395,10 @@ def get_warp_protocol(warp_bin: str | None = None) -> str:
     if rc == 0 and "{" in out:
         try:
             data = json.loads(out[out.find("{"): out.rfind("}") + 1])
-            proto = (
-                data.get("settings", {})
-                .get("warp_tunnel_protocol", "")
-                .lower()
-                .strip()
-            )
+            settings = data.get("settings")
+            if not isinstance(settings, dict):
+                settings = data
+            proto = str(settings.get("warp_tunnel_protocol", "")).lower().strip()
             if proto:
                 return proto
         except Exception:
@@ -420,6 +428,16 @@ def ensure_warp_protocol(desired: str = "wireguard", warp_bin: str | None = None
         with _WARP_STATUS_LOCK:
             _WARP_MODE_CACHE.clear()
     return rc == 0
+
+
+def warp_protocol_for_scope(scope: str) -> str:
+    """Return the tunnel protocol the selected scope can actually use.
+
+    Cloudflare's client refuses proxy mode on WireGuard with "Proxy mode only
+    supports MASQUE", so app-only has to run MASQUE. Full TUN keeps the
+    WireGuard path the endpoint and rotation code expect.
+    """
+    return "masque" if str(scope).strip().lower() == "isolated" else "wireguard"
 
 
 def warp_status(warp_bin: str | None = None, force: bool = False) -> tuple[bool, str, str]:
@@ -595,6 +613,10 @@ def _curl_egress(curl: str, proxy: str, ipv6: bool, timeout: float, insecure: bo
             args.extend(["-x", proxy])
             if insecure and proxy.lower().startswith("https://"):
                 args.append("--proxy-insecure")
+        else:
+            # curl honours http(s)_proxy from the environment, which would send
+            # a "direct" probe through a proxy and report the wrong exit.
+            args.extend(["--noproxy", "*"])
         args.append(endpoint)
         try:
             res = run_hidden(args, timeout=timeout + 1.5)
@@ -758,8 +780,8 @@ def get_public_v6(timeout: float = 6.0) -> str:
 
 
 def normalize_v6_64(addr: str) -> str:
-    """Normalize an IPv6 address to its /64 network prefix string."""
-    clean = addr.strip().split("%", 1)[0]
+    """Normalize an IPv6 address or prefix to its /64 network prefix string."""
+    clean = addr.strip().split("%", 1)[0].split("/", 1)[0]
     if not clean or ":" not in clean:
         return ""
     try:
@@ -802,34 +824,74 @@ def keeper_pause_ctx(reason: str, seconds: int = 180) -> Iterator[None]:
             pass
 
 
+_MUTEX_SYNCHRONIZE = 0x00100000
+_MUTEX_ERROR_ALREADY_EXISTS = 183
+
+
+def _mutex_names(name: str) -> tuple[str, str]:
+    """Return both namespaces a worker mutex can live in.
+
+    A Local\\ mutex only exists inside the session that created it, so a worker
+    started by a scheduled task can be invisible to the dashboard that asks
+    about it. The Global\\ spelling is machine wide, but creating it needs a
+    privilege a standard user lacks, so both are tried.
+    """
+    return f"Global\\{name}", f"Local\\{name}"
+
+
+def _open_mutex(path: str) -> int | None:
+    """Return a handle to an existing mutex, or None when it does not exist."""
+    kernel32 = ctypes.windll.kernel32
+    kernel32.OpenMutexW.restype = ctypes.c_void_p
+    kernel32.OpenMutexW.argtypes = [
+        ctypes.c_uint32,
+        ctypes.c_int32,
+        ctypes.c_wchar_p,
+    ]
+    handle = kernel32.OpenMutexW(_MUTEX_SYNCHRONIZE, False, path)
+    return int(handle) if handle else None
+
+
 def acquire_mutex(name: str) -> int | None:
     """Acquire a named Windows mutex; returns handle if newly owned, else None."""
     kernel32 = ctypes.windll.kernel32
     kernel32.CreateMutexW.restype = ctypes.c_void_p
-    handle = kernel32.CreateMutexW(None, False, f"Local\\{name}")
-    if not handle:
-        return None
-    err = kernel32.GetLastError()
-    ERROR_ALREADY_EXISTS = 183
-    if err == ERROR_ALREADY_EXISTS:
-        kernel32.CloseHandle(ctypes.c_void_p(handle))
-        return None
-    return int(handle)
+    kernel32.CreateMutexW.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_int32,
+        ctypes.c_wchar_p,
+    ]
+    global_name, local_name = _mutex_names(name)
+    for path, other in ((global_name, local_name), (local_name, global_name)):
+        # Another worker may hold the other spelling of the name; only one
+        # keeper (or guard) may run at a time.
+        held = _open_mutex(other)
+        if held:
+            kernel32.CloseHandle(ctypes.c_void_p(held))
+            return None
+        handle = kernel32.CreateMutexW(None, False, path)
+        if not handle:
+            continue  # Global\ needs a privilege a standard user lacks
+        if kernel32.GetLastError() == _MUTEX_ERROR_ALREADY_EXISTS:
+            kernel32.CloseHandle(ctypes.c_void_p(handle))
+            return None
+        return int(handle)
+    return None
 
 
 def is_mutex_held(name: str) -> bool:
-    """True while another process owns a worker mutex.
+    """True while another process owns a worker mutex, in either namespace.
 
     Liveness of the keeper and guard is defined by their named mutex: the
     process takes it on start and Windows drops it when the process ends, so it
     cannot go stale the way a heartbeat file can.
     """
     kernel32 = ctypes.windll.kernel32
-    kernel32.OpenMutexW.restype = ctypes.c_void_p
-    handle = kernel32.OpenMutexW(0x00100000, False, f"Local\\{name}")
-    if handle:
-        kernel32.CloseHandle(ctypes.c_void_p(handle))
-        return True
+    for path in _mutex_names(name):
+        handle = _open_mutex(path)
+        if handle:
+            kernel32.CloseHandle(ctypes.c_void_p(handle))
+            return True
     return False
 
 
@@ -916,7 +978,7 @@ def fetch_opencode_aaaa_pool() -> list[str]:
     for host in ("opencode.ai", "api.opencode.ai"):
         try:
             for info in socket.getaddrinfo(host, 443, socket.AF_INET6, socket.SOCK_STREAM):
-                ip = info[4][0].split("%", 1)[0]
+                ip = str(info[4][0]).split("%", 1)[0]
                 ipaddress.IPv6Address(ip)
                 pool.add(ip)
         except Exception:
@@ -937,13 +999,32 @@ def _current_warp_scope() -> str:
 
 
 def ensure_warp_mode(warp_bin: str, scope: str) -> None:
-    """Put warp-cli into the operation mode required by the selected scope."""
-    desired = "proxy" if scope == "isolated" else "warp"
-    if warp_mode(warp_bin=warp_bin) == desired:
-        return
+    """Put warp-cli into the operation mode required by the selected scope.
+
+    The protocol always travels with the mode. Moving to proxy mode sets MASQUE
+    first, because a proxy client still on WireGuard refuses the connection and
+    drops the machine off the tunnel. Moving back to TUN flips the mode first,
+    because the proxy client rejects a protocol change while it serves proxy.
+    """
+    desired = "proxy" if str(scope).strip().lower() == "isolated" else "warp"
+    current = warp_mode(warp_bin=warp_bin)
     if desired == "proxy":
-        run_warp(["proxy", "port", "40000"], warp_bin=warp_bin, timeout=10.0)
-    run_warp(["mode", desired], warp_bin=warp_bin, timeout=10.0)
+        protocol = get_warp_protocol(warp_bin=warp_bin)
+        if current == "proxy" and protocol and not protocol.startswith("masque"):
+            # A serving proxy client rejects a protocol change, so the tunnel
+            # has to come down before the drift can be corrected.
+            run_warp(["disconnect"], warp_bin=warp_bin, timeout=10.0)
+        if not ensure_warp_protocol("masque", warp_bin=warp_bin):
+            # Switching mode now would leave a proxy on a protocol it cannot
+            # serve; keep the working tunnel and let the keeper retry.
+            return
+        if current != "proxy":
+            run_warp(["proxy", "port", "40000"], warp_bin=warp_bin, timeout=10.0)
+            run_warp(["mode", "proxy"], warp_bin=warp_bin, timeout=10.0)
+        return
+    if current != "warp":
+        run_warp(["mode", "warp"], warp_bin=warp_bin, timeout=10.0)
+    ensure_warp_protocol("wireguard", warp_bin=warp_bin)
 
 
 def warp_registration_healthy(warp_bin: str) -> bool:
@@ -1051,7 +1132,6 @@ def hop_report(
 
     scope = _current_warp_scope()
     ensure_warp_mode(warp_bin, scope)
-    ensure_warp_protocol("wireguard", warp_bin=warp_bin)
 
     seen = ""
     # A disconnected tunnel cannot produce a /64. Reconnecting a few times is

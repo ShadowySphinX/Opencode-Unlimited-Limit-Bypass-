@@ -158,7 +158,14 @@ $Wrappers = @{
     "opencode-unlimited-guard.cmd"  = "@echo off`r`n`"$PyExe`" `"$ScriptsDest\zen_guard.py`" %*`r`nexit /b %ERRORLEVEL%`r`n"
 }
 foreach ($kv in $Wrappers.GetEnumerator()) {
-    Set-Content -Path (Join-Path $BinDest $kv.Key) -Value $kv.Value -Encoding ASCII -NoNewline
+    $Body = $kv.Value
+    $Shim = Join-Path $BinDest $kv.Key
+    if ($Body -match '[^\x00-\x7F]' -and $Body -match '^@echo off') {
+        # cmd.exe reads the batch file in the console code page; a non-ASCII
+        # install path needs UTF-8 mode before the first command runs.
+        $Body = $Body -replace '^@echo off\r\n', "@echo off`r`nchcp 65001 >nul`r`n"
+    }
+    [IO.File]::WriteAllText($Shim, $Body, (New-Object System.Text.UTF8Encoding($false)))
 }
 Ok "scripts & shims installed in $Dest"
 
@@ -215,20 +222,6 @@ if (-not $SkipWarmCheck) {
         Invoke-Warp @("registration", "new") | Out-Null
     }
 
-    $settingsRaw = (Invoke-Warp @("-j", "settings") | Out-String)
-    $protocol = ""
-    $opMode = ""
-    try {
-        $settings = $settingsRaw | ConvertFrom-Json
-        $protocol = [string]$settings.settings.warp_tunnel_protocol
-        $opMode = [string]$settings.settings.operation_mode
-    } catch {}
-
-    if ($protocol -and $protocol -ne "wireguard") {
-        Say "switching WARP tunnel protocol to WireGuard..."
-        Invoke-Warp @("tunnel", "protocol", "set", "wireguard") | Out-Null
-    }
-
     # Keep the scope and egress mode the user selected in the dashboard.
     # A reinstall must not silently switch an App-Only setup to full TUN.
     $EgressCfg = Join-Path $env:LOCALAPPDATA "opencode-unlimited\lane\egress_mode.json"
@@ -242,10 +235,33 @@ if (-not $SkipWarmCheck) {
         } catch {}
     }
     $DesiredOpMode = if ($WarpScope -eq "isolated" -or $EgressMode -in @("tor", "custom")) { "proxy" } else { "warp" }
+    $DesiredProtocol = if ($DesiredOpMode -eq "proxy") { "masque" } else { "wireguard" }
+
+    $settingsRaw = (Invoke-Warp @("-j", "settings") | Out-String)
+    $protocol = ""
+    $opMode = ""
+    try {
+        $settings = $settingsRaw | ConvertFrom-Json
+        $protocol = [string]$settings.settings.warp_tunnel_protocol
+        $opMode = [string]$settings.settings.operation_mode
+    } catch {}
+
+    # Proxy mode only accepts MASQUE; WireGuard there fails and leaves the
+    # proxy port dead. The protocol must be set before switching the mode.
+    if ($protocol -ne $DesiredProtocol) {
+        # An unreadable mode is treated like proxy: dropping the tunnel is the
+        # only way to be sure a serving proxy client accepts the change.
+        if ($opMode -eq "proxy" -or [string]::IsNullOrEmpty($opMode)) {
+            Invoke-Warp @("disconnect") | Out-Null
+        }
+        Say "switching WARP tunnel protocol to $DesiredProtocol..."
+        Invoke-Warp @("tunnel", "protocol", "set", $DesiredProtocol) | Out-Null
+    }
+
     if ($DesiredOpMode -eq "proxy") {
         Invoke-Warp @("proxy", "port", "40000") | Out-Null
     }
-    if ($opMode -and $opMode -ne $DesiredOpMode) {
+    if ($opMode -ne $DesiredOpMode) {
         Say "switching WARP operating mode to $DesiredOpMode..."
         Invoke-Warp @("mode", $DesiredOpMode) | Out-Null
     }

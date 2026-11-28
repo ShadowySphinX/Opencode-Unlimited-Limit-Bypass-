@@ -1,6 +1,6 @@
 ﻿<#
 .SYNOPSIS
-    Builds OpencodeUnlimited-Avatar.exe v4.0 (standalone Windows GUI executable).
+    Builds OpencodeUnlimited-Avatar.exe v4.0.3 (standalone Windows GUI executable).
 #>
 [CmdletBinding()]
 param()

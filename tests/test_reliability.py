@@ -73,6 +73,20 @@ class RunHiddenTests(unittest.TestCase):
         self.assertTrue(kwargs["text"])
         self.assertEqual(kwargs["timeout"], 3.0)
 
+    def test_non_ascii_output_is_decoded_as_utf8(self) -> None:
+        # A Windows console defaults to a legacy code page; decoding warp-cli or
+        # opencode output with it would raise instead of returning the text.
+        result = ouc_common.run_hidden(
+            [
+                sys.executable,
+                "-c",
+                "import sys; sys.stdout.buffer.write('\u00e9'.encode())",
+            ],
+            timeout=30.0,
+        )
+
+        self.assertEqual(result.stdout, "\u00e9")
+
     def test_linux_does_not_pass_windows_creation_flags(self) -> None:
         with mock.patch.object(
             ouc_common.sys, "platform", "linux"
@@ -150,6 +164,17 @@ class EdgeFailoverTests(unittest.TestCase):
             zen_proxy.PROXY_LOG_FILE,
         ) = self._saved
         self.tmp.cleanup()
+
+    def test_bracketed_ipv6_localhost_is_connected_without_brackets(self) -> None:
+        state = zen_proxy._WarpState([], "")
+        sock = mock.Mock()
+
+        with mock.patch.object(
+            zen_proxy.socket, "create_connection", return_value=sock
+        ) as connect:
+            self.assertIs(zen_proxy._open_upstream("[::1]", 443, state), sock)
+
+        connect.assert_called_once_with(("::1", 443), timeout=10.0)
 
     def test_stale_warp_address_is_refreshed_once(self) -> None:
         state = zen_proxy._WarpState(["edge-a"], "edge-a")
@@ -389,6 +414,44 @@ class DoorHoldTests(unittest.TestCase):
         repair.assert_not_called()
 
 
+class TunnelByteActivityTests(unittest.TestCase):
+    """The proxy publishes byte activity so an idle socket is not 'streaming'."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self.tmp.name)
+        self._saved = (zen_proxy.LANE_DIR, zen_proxy.PROXY_STATUS_FILE)
+        zen_proxy.LANE_DIR = self.dir
+        zen_proxy.PROXY_STATUS_FILE = self.dir / "proxy_status.json"
+        zen_proxy._reset_tunnel_activity()
+
+    def tearDown(self) -> None:
+        zen_proxy._reset_tunnel_activity()
+        zen_proxy.LANE_DIR, zen_proxy.PROXY_STATUS_FILE = self._saved
+        self.tmp.cleanup()
+
+    def status(self) -> dict:
+        return json.loads(zen_proxy.PROXY_STATUS_FILE.read_text(encoding="utf-8"))
+
+    def test_an_idle_tunnel_publishes_no_byte_stamp(self) -> None:
+        zen_proxy._enter_tunnel()
+
+        status = self.status()
+        self.assertEqual(status["active_tunnels"], 1)
+        self.assertEqual(status["last_byte_ts"], 0)
+
+    def test_a_relayed_byte_updates_the_published_stamp(self) -> None:
+        zen_proxy._enter_tunnel()
+        try:
+            zen_proxy._note_tunnel_bytes()
+        finally:
+            zen_proxy._leave_tunnel()
+
+        status = self.status()
+        self.assertGreater(status["last_byte_ts"], 0)
+        self.assertLessEqual(status["last_byte_ts"], int(time.time()))
+
+
 class RegistrationBackoffTests(unittest.TestCase):
     def test_retries_wait_longer_each_time(self) -> None:
         sleeps: list[float] = []
@@ -621,12 +684,37 @@ class AutoRepairTests(unittest.TestCase):
             api2._auto_repair_tick()
         self.assertEqual(api2._repair_performed, [])
 
+    def test_a_single_failed_probe_is_only_a_blip(self) -> None:
+        # One bad probe does not justify reconnecting a healthy tunnel; a
+        # rotation nobody asked for reads as a bug.
+        state = self._state(wired=True, listening=True, keeper_running=True)
+        state["proxy"] = {"fallback_active": True, "errors_5m": 1}
+        api = self._api(state)
+
+        api._auto_repair_tick()
+
+        self.assertEqual(api._repair_performed, [])
+
     def test_fallback_changes_edge_instead_of_restarting_a_healthy_route(self) -> None:
         state = self._state(wired=True, listening=True, keeper_running=True)
         state["proxy"] = {"fallback_active": True, "errors_5m": 1}
         api = self._api(state)
 
         api._auto_repair_tick()
+        api._auto_repair_tick()
+
+        self.assertEqual(api._repair_performed, ["hop"])
+
+    def test_a_freshly_booted_clock_still_allows_the_first_repair(self) -> None:
+        # time.monotonic() counts from boot, so a machine that started seconds
+        # ago must not be read as "a repair just ran".
+        state = self._state(wired=True, listening=True, keeper_running=True)
+        state["proxy"] = {"fallback_active": True, "errors_5m": 1}
+        api = self._api(state)
+
+        with mock.patch.object(avatar_ui.time, "monotonic", return_value=5.0):
+            api._auto_repair_tick()
+            api._auto_repair_tick()
 
         self.assertEqual(api._repair_performed, ["hop"])
 
@@ -887,7 +975,7 @@ class FreeWallTests(unittest.TestCase):
         )
         self.assertEqual(reset, datetime(2026, 11, 18, 0, 0, tzinfo=timezone.utc))
 
-    def test_two_fresh_addresses_that_hit_the_free_wall_pause_until_reset(self) -> None:
+    def test_two_fresh_addresses_that_hit_the_free_wall_escalate_instead_of_stopping(self) -> None:
         now = int(datetime(2026, 11, 17, 12, 0, tzinfo=timezone.utc).timestamp())
         state = zen_guard._default_state()
         state["last_ok_hop"] = now - 30
@@ -895,18 +983,57 @@ class FreeWallTests(unittest.TestCase):
 
         with mock.patch.object(zen_guard, "_save_state"), mock.patch.object(
             zen_guard, "append_log"
-        ), mock.patch.object(zen_guard, "_egress_mode", return_value="warp"):
+        ), mock.patch.object(zen_guard, "_egress_mode", return_value="warp"), \
+                mock.patch.object(zen_guard, "FREE_WALL_LATCH", False):
             self.assertFalse(zen_guard._note_wall(state, now))
             self.assertEqual(state["free_wall_hops"], 1)
 
             state["last_ok_hop"] = now + 100
             state["last_free_wall"] = now + 105
-            self.assertTrue(zen_guard._note_wall(state, now + 110))
+            self.assertFalse(zen_guard._note_wall(state, now + 110))
 
-        self.assertEqual(
-            state["free_wall_until"], zen_guard._next_utc_midnight(now + 110)
-        )
+        # No all-day stop: the next attempt is simply further out.
+        self.assertEqual(state["free_wall_until"], 0)
+        self.assertEqual(state["backoff_until"], 0)
+        self.assertEqual(state["retry_level"], 1)
+        self.assertEqual(zen_guard._rotation_wait(state), 2 * 60)
+
+    def test_the_latch_still_exists_behind_the_environment_flag(self) -> None:
+        now = int(datetime(2026, 11, 17, 12, 0, tzinfo=timezone.utc).timestamp())
+        state = zen_guard._default_state()
+        state["last_ok_hop"] = now - 30
+        state["last_free_wall"] = now - 5
+        state["free_wall_hops"] = 1
+
+        with mock.patch.object(zen_guard, "_save_state"), mock.patch.object(
+            zen_guard, "append_log"
+        ), mock.patch.object(zen_guard, "_egress_mode", return_value="warp"), \
+                mock.patch.object(zen_guard, "FREE_WALL_LATCH", True):
+            self.assertTrue(zen_guard._note_wall(state, now))
+
+        self.assertEqual(state["free_wall_until"], zen_guard._next_utc_midnight(now))
         self.assertEqual(state["backoff_until"], state["free_wall_until"])
+
+
+class CurlEgressTests(unittest.TestCase):
+    def test_a_direct_probe_ignores_environment_proxies(self) -> None:
+        completed = mock.Mock(stdout="ip=1.2.3.4\n")
+        with mock.patch.object(ouc_common, "run_hidden", return_value=completed) as run:
+            found = ouc_common._curl_egress("curl", "", True, 2.0)
+
+        self.assertEqual(found, "1.2.3.4")
+        args = run.call_args[0][0]
+        self.assertIn("--noproxy", args)
+        self.assertIn("-6", args)
+
+    def test_a_proxy_probe_uses_only_the_configured_proxy(self) -> None:
+        completed = mock.Mock(stdout="ip=1.2.3.4\n")
+        with mock.patch.object(ouc_common, "run_hidden", return_value=completed) as run:
+            ouc_common._curl_egress("curl", "socks5h://127.0.0.1:1080", False, 2.0)
+
+        args = run.call_args[0][0]
+        self.assertIn("-x", args)
+        self.assertNotIn("--noproxy", args)
 
 
 class CustomProxyFailoverTests(unittest.TestCase):

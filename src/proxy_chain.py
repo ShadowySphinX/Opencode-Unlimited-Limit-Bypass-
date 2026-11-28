@@ -15,7 +15,7 @@ import socket
 import ssl
 from typing import Literal
 
-from ouc_common import LANE_DIR, ensure_dirs
+from ouc_common import LANE_DIR, ensure_dirs, normalize_v6_64
 from tor_manager import (
     get_active_tor_target,
     open_socks5_tunnel,
@@ -473,6 +473,11 @@ def _rotate_relay_spec(spec: dict) -> tuple[bool, str]:
         return False, (
             f"relay rotated to {block or '?'} but no egress could be confirmed; "
             "check the relay host allowlist and TLS certificate"
+        )
+    if block and normalize_v6_64(exit_ip) != normalize_v6_64(block):
+        return False, (
+            f"relay reports block {block} but the local probe exits from "
+            f"{exit_ip}; the rotation did not change the route"
         )
     suffix = "" if relay_egress else " (relay-side probe unavailable)"
     return True, f"relay {where} -> {block} (exit {exit_ip}){suffix}"

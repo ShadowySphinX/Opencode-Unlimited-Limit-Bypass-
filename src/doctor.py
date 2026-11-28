@@ -2,13 +2,11 @@
 
 from __future__ import annotations
 
-import ctypes
 import json
 import shutil
 import socket
 import sys
 from datetime import datetime, timezone
-from pathlib import Path
 
 from ouc_common import (
     BIN_DIR,
@@ -26,6 +24,7 @@ from ouc_common import (
     service_proxy_wired,
     warp_status,
 )
+from ouc_common import is_mutex_held
 from ouc_firewall import is_killswitch_installed
 
 
@@ -42,14 +41,8 @@ def _bad(msg: str) -> None:
 
 
 def _is_mutex_held(name: str) -> bool:
-    kernel32 = ctypes.windll.kernel32
-    kernel32.OpenMutexW.restype = ctypes.c_void_p
-    SYNCHRONIZE = 0x00100000
-    handle = kernel32.OpenMutexW(SYNCHRONIZE, False, f"Local\\{name}")
-    if handle:
-        kernel32.CloseHandle(ctypes.c_void_p(handle))
-        return True
-    return False
+    """Same liveness check the dashboard uses, across both namespaces."""
+    return is_mutex_held(name)
 
 
 def _task_exists(task_name: str) -> bool:
@@ -270,6 +263,34 @@ def main() -> int:
         _warn(f"opencode on PATH resolves to {which_oc} instead of {BIN_DIR / 'opencode.cmd'} - open a new terminal or move {BIN_DIR} earlier in PATH")
     else:
         _warn(f"opencode not on PATH - add {BIN_DIR} to User PATH")
+
+    # 9. Client-side lock rows (names and parsed times only - never the values)
+    try:
+        from auto_resume import list_limit_state_keys, read_opencode_lock
+
+        def _when(stamp: int) -> str:
+            return datetime.fromtimestamp(stamp).strftime("%d %b %H:%M")
+
+        lock_rows = list_limit_state_keys()
+        info = read_opencode_lock()
+        times = dict(info.get("keys") or {})
+        if lock_rows:
+            parts = []
+            for name in sorted({name for _db, name in lock_rows}):
+                stamp = int(times.get(name, 0) or 0)
+                parts.append(f"{name} -> wait until {_when(stamp)}" if stamp else f"{name} -> no time stored")
+            _warn(
+                "client lock rows present: "
+                + "; ".join(parts)
+                + " - that time is a client hint: the guard clears it, tries the chat once, "
+                "and only rotates if that attempt fails"
+            )
+        elif int(info.get("until", 0) or 0):
+            _ok(f"client lock says wait until {_when(int(info['until']))} (a hint, not a wall)")
+        else:
+            _ok("no client-side limit lock rows")
+    except Exception as exc:
+        _warn(f"client lock check skipped: {exc}")
 
     print("")
     print("  all [OK] = ready. run `opencode` from a fresh terminal.")

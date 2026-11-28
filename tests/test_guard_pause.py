@@ -216,14 +216,38 @@ class GuardGateTests(unittest.TestCase):
 
         self.assertFalse(zen_guard._work_is_live())
 
-    def _write_tunnels(self, count: int, age: float = 0.0) -> None:
+    def _write_tunnels(
+        self, count: int, age: float = 0.0, byte_age: float | None = None
+    ) -> None:
         stamp = int(time.time() - age)
+        data = {"active_tunnels": count, "active_tunnels_ts": stamp}
+        if byte_age is not None:
+            data["last_byte_ts"] = int(time.time() - byte_age)
         (self.lane / "proxy_status.json").write_text(
-            json.dumps({"active_tunnels": count, "active_tunnels_ts": stamp}),
-            encoding="utf-8",
+            json.dumps(data), encoding="utf-8"
         )
 
-    def test_open_proxy_tunnel_counts_as_live_with_a_quiet_log(self) -> None:
+    def test_idle_tunnel_with_a_quiet_log_is_not_live(self) -> None:
+        # An open keep-alive socket used to hold rotations back for the whole
+        # cap even though nothing was being generated.
+        stamp = time.time() - zen_guard.QUIET_SECONDS - 30
+        import os
+
+        os.utime(self.opencode_log, (stamp, stamp))
+        self._write_tunnels(1, byte_age=zen_guard.QUIET_SECONDS + 5)
+
+        self.assertFalse(zen_guard._work_is_live())
+
+    def test_tunnel_that_relayed_bytes_counts_as_live(self) -> None:
+        stamp = time.time() - zen_guard.QUIET_SECONDS - 30
+        import os
+
+        os.utime(self.opencode_log, (stamp, stamp))
+        self._write_tunnels(1, byte_age=2)
+
+        self.assertTrue(zen_guard._work_is_live())
+
+    def test_old_proxy_tunnel_count_still_counts_as_live(self) -> None:
         stamp = time.time() - zen_guard.QUIET_SECONDS - 30
         import os
 
@@ -308,9 +332,42 @@ class GuardGateTests(unittest.TestCase):
             zen_guard._dispatch_auto_resume(state)
 
         resume.assert_not_called()
-        self.assertIn(
-            "resume is turned off", self.log_file.read_text(encoding="utf-8")
-        )
+        log = self.log_file.read_text(encoding="utf-8")
+        self.assertIn("resume is turned off", log)
+        # The attempt must still be recorded: an unbound outcome used to abort
+        # the state write, so every poll re-attempted the same chat.
+        self.assertIn("ses_a", state["resumed"])
+        self.assertNotIn("[auto-resume] note", log)
+
+    def test_a_failed_resume_keeps_the_chat_pending_for_a_retry(self) -> None:
+        state = dict(zen_guard._default_state())
+        state["pending"] = {"ses_a": self.now - 60}
+
+        import auto_resume
+
+        with mock.patch.object(auto_resume, "is_auto_resume_enabled", return_value=True), \
+                mock.patch.object(auto_resume, "clear_opencode_free_limit", return_value=0), \
+                mock.patch.object(auto_resume, "resume_active_session", return_value=(False, "no window")), \
+                mock.patch.object(zen_guard.time, "sleep"):
+            zen_guard._dispatch_auto_resume(state)
+
+        self.assertIn("ses_a", state["pending"])
+        self.assertIn("ses_a", state["resumed"])
+
+    def test_a_sent_resume_clears_the_chat_from_pending(self) -> None:
+        state = dict(zen_guard._default_state())
+        state["pending"] = {"ses_a": self.now - 60}
+
+        import auto_resume
+
+        with mock.patch.object(auto_resume, "is_auto_resume_enabled", return_value=True), \
+                mock.patch.object(auto_resume, "clear_opencode_free_limit", return_value=0), \
+                mock.patch.object(auto_resume, "resume_active_session", return_value=(True, "sent")), \
+                mock.patch.object(zen_guard.time, "sleep"):
+            zen_guard._dispatch_auto_resume(state)
+
+        self.assertNotIn("ses_a", state["pending"])
+        self.assertIn("ses_a", state["resumed"])
 
     def test_a_failed_hop_holds_the_next_rotation_for_longer(self) -> None:
         state = dict(zen_guard._default_state())
@@ -425,3 +482,19 @@ class BurnListTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+    # -- state durability ---------------------------------------------
+
+    def test_corrupt_state_does_not_replay_the_whole_log(self) -> None:
+        self.opencode_log.write_text("x" * 1234, encoding="utf-8")
+        self.state_file.write_text("{not json", encoding="utf-8")
+        state = zen_guard._load_state()
+        self.assertEqual(state["offset"], 1234)
+        self.assertEqual(state["blacklist"], [])
+
+    def test_save_state_replaces_the_file_atomically(self) -> None:
+        state = dict(zen_guard._default_state())
+        state["hops"] = 7
+        zen_guard._save_state(state)
+        self.assertEqual(self.read_state()["hops"], 7)
+        self.assertFalse((self.state_file.parent / (self.state_file.name + ".tmp")).exists())

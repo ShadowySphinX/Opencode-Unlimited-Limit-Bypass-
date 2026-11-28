@@ -7,7 +7,6 @@ without needing OpenCode Desktop installed.
 
 from __future__ import annotations
 
-import json
 import sys
 import tempfile
 import unittest
@@ -154,6 +153,23 @@ class DesktopBrandTests(unittest.TestCase):
         self.assertTrue(ok)
         self.assertIn("already", message)
         self.assertEqual(self.asar.stat().st_size, size)
+
+    def test_a_patched_archive_is_never_recorded_as_the_restore_baseline(self) -> None:
+        desktop_brand.apply_copy()
+        header = self.state_dir / "header.bin"
+        header.unlink()
+
+        with mock.patch.object(desktop_brand, "_is_patched", return_value=True), \
+                mock.patch.object(
+                    desktop_brand,
+                    "_patched",
+                    return_value=({("package.json",): PACKAGE}, ["window title"]),
+                ):
+            ok, message = desktop_brand.apply_copy()
+
+        self.assertTrue(ok, message)
+        self.assertFalse(header.is_file())
+        self.assertFalse(desktop_brand.copy_status()["restorable"])
 
     def test_nothing_is_written_while_the_app_is_open(self) -> None:
         with mock.patch.object(desktop_brand, "app_is_open", return_value=True):
