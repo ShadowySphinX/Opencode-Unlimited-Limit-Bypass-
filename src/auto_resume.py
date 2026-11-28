@@ -13,6 +13,7 @@ import sqlite3
 import subprocess
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 _SRC = Path(__file__).resolve().parent
@@ -65,6 +66,94 @@ def drafts_databases() -> list[Path]:
         if path not in seen:
             seen.append(path)
     return seen
+
+
+# Names that suggest a stored wait time rather than a counter. Used only to
+# decide which rows to parse; nothing is ever printed or logged as a value.
+LOCK_KEY_HINTS = ("limit", "upsell", "quota", "reset")
+
+
+def _lock_epoch(value) -> int:
+    """Normalise a stored lock value to an epoch second, or 0 when it is not a time.
+
+    The Desktop has written this row as epoch milliseconds, epoch seconds and
+    ISO text across versions, so all three are accepted and then sanity checked
+    against the present before anything treats it as a deadline.
+    """
+    if value is None:
+        return 0
+    if isinstance(value, (bytes, bytearray)):
+        try:
+            value = bytes(value).decode("utf-8", "ignore").strip()
+        except Exception:
+            return 0
+    if isinstance(value, (int, float)):
+        number = float(value)
+    else:
+        text = str(value).strip().strip('"')
+        if not text:
+            return 0
+        try:
+            number = float(text)
+        except ValueError:
+            try:
+                stamp = datetime.fromisoformat(text.replace("Z", "+00:00"))
+            except ValueError:
+                return 0
+            if stamp.tzinfo is None:
+                stamp = stamp.replace(tzinfo=timezone.utc)
+            number = stamp.timestamp()
+    # A millisecond stamp is ~1.7e12; anything that large is not seconds.
+    if number > 1e11:
+        number /= 1000.0
+    now = time.time()
+    if not (now - 30 * 86400 <= number <= now + 60 * 86400):
+        return 0
+    return int(number)
+
+
+def read_opencode_lock() -> dict:
+    """The wait time OpenCode Desktop stored client-side, normalised.
+
+    Returns ``{"until": epoch, "keys": {name: epoch}, "detail": [(db, key, epoch)]}``.
+    ``until`` is the latest advertised time across the databases the app has
+    used, or 0 when nothing that looks like a deadline is stored. This is a
+    client hint only: the guard displays it and clears it once it has passed,
+    never rotates because of it.
+    """
+    found: dict[str, int] = {}
+    detail: list[tuple[str, str, int]] = []
+    for db_path in drafts_databases():
+        if not db_path.is_file():
+            continue
+        try:
+            conn = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True, timeout=3.0)
+        except Exception:
+            continue
+        try:
+            rows = conn.execute("SELECT key, value FROM state").fetchall()
+            for key, value in rows:
+                name = str(key)
+                low = name.lower()
+                if not any(hint in low for hint in LOCK_KEY_HINTS):
+                    continue
+                stamp = _lock_epoch(value)
+                if not stamp:
+                    continue
+                detail.append((str(db_path), name, stamp))
+                found[name] = max(found.get(name, 0), stamp)
+        except Exception:
+            pass
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+    return {
+        "until": max(found.values()) if found else 0,
+        "keys": found,
+        "detail": detail,
+    }
 
 
 def list_limit_state_keys() -> list[tuple[str, str]]:

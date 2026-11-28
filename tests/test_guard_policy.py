@@ -321,9 +321,17 @@ class _StopPoll(Exception):
 class MainLoopTests(GuardBase):
     """One poll of the guard loop, stopped by raising from time.sleep."""
 
-    def _run_one_poll(self, state_fields: dict) -> mock.Mock:
+    def _run_one_poll(
+        self,
+        state_fields: dict,
+        *,
+        soft_retry: bool = False,
+        note_wall: bool = False,
+    ) -> dict:
         self.write_state(**state_fields)
         switch = mock.Mock(return_value=True)
+        rotate = mock.Mock(return_value=True)
+        soft = mock.Mock(return_value=soft_retry)
         polls = {"n": 0}
 
         def _sleep(_seconds: float) -> None:
@@ -340,22 +348,104 @@ class MainLoopTests(GuardBase):
                 mock.patch.object(
                     zen_guard, "_read_new_log_bytes", return_value=(True, ["ses_a"])
                 ), \
-                mock.patch.object(zen_guard, "_note_wall", return_value=True), \
+                mock.patch.object(zen_guard, "_soft_retry", soft), \
+                mock.patch.object(zen_guard, "_note_wall", return_value=note_wall), \
+                mock.patch.object(zen_guard, "_rotate", rotate), \
                 mock.patch.object(zen_guard, "_switch_account", switch), \
                 mock.patch.object(zen_guard.time, "sleep", side_effect=_sleep):
             with self.assertRaises(_StopPoll):
                 zen_guard.main()
-        return switch
+        return {"switch": switch, "rotate": rotate, "soft": soft}
 
     def test_the_first_wall_of_the_day_does_not_spend_an_account(self) -> None:
-        switch = self._run_one_poll({"free_wall_hops": 0})
+        calls = self._run_one_poll({"free_wall_hops": 0})
 
-        switch.assert_not_called()
+        calls["switch"].assert_not_called()
 
     def test_an_account_is_tried_once_a_confirmed_hop_hit_the_wall(self) -> None:
-        switch = self._run_one_poll({"free_wall_hops": 1})
+        calls = self._run_one_poll({"free_wall_hops": 1})
 
-        switch.assert_called_once()
+        calls["switch"].assert_called_once()
+
+    def test_a_wall_is_answered_with_a_soft_retry_before_a_hop(self) -> None:
+        calls = self._run_one_poll({"free_wall_hops": 0}, soft_retry=True)
+
+        calls["soft"].assert_called_once()
+        calls["rotate"].assert_not_called()
+        calls["switch"].assert_not_called()
+        self.assertTrue(self.read_state()["wall_pending"])
+
+    def test_a_soft_retry_inside_its_window_holds_the_rotation(self) -> None:
+        calls = self._run_one_poll(
+            {"free_wall_hops": 0, "soft_pending": {"ses_a": self.now - 10}}
+        )
+
+        calls["soft"].assert_not_called()
+        calls["rotate"].assert_not_called()
+
+    def test_a_stale_client_lock_is_cleared_even_while_paused(self) -> None:
+        now = int(time.time())
+        lock = {"until": now - 60, "keys": {"free-limit": now - 60}}
+
+        with mock.patch("auto_resume.read_opencode_lock", return_value=lock), \
+                mock.patch("auto_resume.clear_opencode_free_limit", return_value=1) as clear:
+            self._run_one_poll({"backoff_until": now + 600})
+
+        clear.assert_called()
+        decisions = [item.get("decision") for item in self.audit_lines()]
+        self.assertIn("lock-expired", decisions)
+        self.assertEqual(self.read_state()["client_lock_until"], 0)
+
+    def test_the_automatic_soft_retry_waits_out_a_pause(self) -> None:
+        now = int(time.time())
+
+        calls = self._run_one_poll({"backoff_until": now + 600}, soft_retry=True)
+
+        calls["soft"].assert_not_called()
+        calls["rotate"].assert_not_called()
+
+    def _write_chat(self, *, newest_is_error: bool) -> None:
+        import sqlite3
+
+        con = sqlite3.connect(self.db_file)
+        try:
+            con.execute(
+                "CREATE TABLE session_v2 (id TEXT, time_archived INTEGER, "
+                "time_updated INTEGER, directory TEXT, title TEXT)"
+            )
+            con.execute(
+                "CREATE TABLE session_message (session_id TEXT, time_created INTEGER, data TEXT)"
+            )
+            con.execute("INSERT INTO session_v2 VALUES ('ses_a', NULL, 1, '', '')")
+            stamp = int(time.time() * 1000)
+            if newest_is_error:
+                payload = {"finish": "error", "text": "FreeUsageLimitError: free usage limit"}
+            else:
+                payload = {"finish": "stop", "text": "here is the answer"}
+            con.execute(
+                "INSERT INTO session_message VALUES ('ses_a', ?, ?)",
+                (stamp, json.dumps(payload)),
+            )
+            con.commit()
+        finally:
+            con.close()
+
+    def test_a_wall_the_chat_already_moved_past_never_rotates(self) -> None:
+        self._write_chat(newest_is_error=False)
+
+        calls = self._run_one_poll({"free_wall_hops": 0})
+
+        calls["soft"].assert_not_called()
+        calls["rotate"].assert_not_called()
+        self.assertEqual(self.audit_lines()[-1]["decision"], "already-moved")
+
+    def test_a_wall_the_chat_is_still_sitting_on_is_handled(self) -> None:
+        self._write_chat(newest_is_error=True)
+
+        calls = self._run_one_poll({"free_wall_hops": 0}, soft_retry=True)
+
+        calls["soft"].assert_called_once()
+        calls["rotate"].assert_not_called()
 
 
 class ManualRotationTests(GuardBase):

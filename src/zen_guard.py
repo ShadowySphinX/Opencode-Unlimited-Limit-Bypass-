@@ -100,6 +100,16 @@ FREE_WALL_LATCH = os.environ.get("OUC_FREE_WALL_LATCH", "").strip() == "1"
 # A wall this soon after the guard's own 'continue' measures that prompt, not
 # the address, so it must not count as proof that the new /64 is spent.
 SELF_INFLICTED_SECONDS = 120
+# The Desktop's own "wait until ..." row is a client hint written after a failed
+# request. It can sit hours out while requests still succeed, so it is read for
+# display, cleared once it has passed, and never used to gate a rotation.
+SOFT_RETRY_SECONDS = 90
+SOFT_RETRY_MAX_WAIT = 4 * SOFT_RETRY_SECONDS
+SOFT_RETRY_ENABLED = os.environ.get("OUC_SOFT_RETRY", "1").strip() != "0"
+# How long after "continue" the database gets to show a new message.
+RESUME_VERIFY_SECONDS = 60
+LOCK_POLL_SECONDS = 60
+LOCK_CLEAR_MIN_SECONDS = 60
 # Every wall, gate decision, hop and unlock leaves one line here so "it did
 # nothing" can always be explained afterwards.
 AUDIT_FILE = GUARD_DIR_AUDIT
@@ -168,6 +178,15 @@ def _default_state(offset: int = 0) -> dict:
         "ladder_marked_hop": 0,
         "switch_pending": {},
         "db_scan_at": 0,
+        "client_lock_until": 0,
+        "client_lock_keys": {},
+        "client_lock_at": 0,
+        "lock_cleared_at": 0,
+        "soft_pending": {},
+        "soft_retry": {},
+        "resume_verify": {},
+        "last_verdict": "",
+        "verdict_at": 0,
         "last_decision": "",
         "last_decision_at": 0,
     }
@@ -252,8 +271,15 @@ def _resumable(state: dict, now: float | None = None) -> list[str]:
 
 def _prune(state: dict) -> None:
     cutoff = time.time() - PENDING_MAX_AGE
-    for key in ("pending", "resumed"):
+    for key in ("pending", "resumed", "soft_retry", "soft_pending"):
         state[key] = {k: v for k, v in (state.get(key) or {}).items() if float(v or 0) >= cutoff}
+    verify = state.get("resume_verify")
+    if isinstance(verify, dict):
+        state["resume_verify"] = {
+            k: v
+            for k, v in verify.items()
+            if isinstance(v, dict) and float(v.get("at", 0) or 0) >= cutoff
+        }
 
 
 def _dispatch_auto_resume(state: dict) -> None:
@@ -284,6 +310,23 @@ def _dispatch_auto_resume(state: dict) -> None:
             state.setdefault("resumed", {})[sid] = now
             if ok:
                 (state.get("pending") or {}).pop(sid, None)
+        if ok and sids:
+            # "A keystroke left the process" is not a result. The next polls ask
+            # the database whether the chat really moved.
+            verify = state.setdefault("resume_verify", {})
+            for sid in sids:
+                verify[sid] = {"at": int(now), "verdict": "pending"}
+            if _fallback_is_fresh(int(now)):
+                # The request left over the normal route, so the resume proves
+                # nothing about the provider path.
+                _audit(
+                    state,
+                    "unlock",
+                    sessions=len(sids),
+                    resume_result="unconfirmed",
+                    decision="unlock-unconfirmed",
+                    reason="the request left through the fallback route",
+                )
         _prune(state)
         _save_state(state)
     except Exception as exc:
@@ -338,6 +381,384 @@ def _sessions_stuck_on_wall(now: float | None = None) -> list[str]:
         except Exception:
             pass
     return stuck
+
+
+def _open_db() -> object | None:
+    """Read-only connection to OpenCode's database, or None when unavailable."""
+    if not OPENCODE_DB_FILE.is_file():
+        return None
+    try:
+        import sqlite3
+
+        return sqlite3.connect(f"file:{OPENCODE_DB_FILE.as_posix()}?mode=ro", uri=True, timeout=3.0)
+    except Exception:
+        return None
+
+
+def _newest_message(con, session_id: str) -> tuple[str, str, int] | None:
+    """(finish, data, created_ms) of a chat's newest message, or None."""
+    try:
+        row = con.execute(
+            "SELECT json_extract(data, '$.finish'), data, time_created FROM session_message "
+            "WHERE session_id = ? ORDER BY time_created DESC LIMIT 1",
+            (session_id,),
+        ).fetchone()
+    except Exception:
+        return None
+    if not row:
+        return None
+    try:
+        created = int(row[2] or 0)
+    except (TypeError, ValueError):
+        created = 0
+    return str(row[0] or ""), str(row[1] or ""), created
+
+
+def _is_free_wall_message(message: tuple[str, str, int] | None) -> bool:
+    if not message:
+        return False
+    finish, data = message[0], message[1]
+    return finish == "error" and "FreeUsageLimitError" in data
+
+
+def _session_state(session_id: str) -> tuple[str, int]:
+    """('walled'|'moved'|'unknown', newest message epoch) for one chat.
+
+    A chat whose newest message is the free-limit error is stuck on it. Any
+    other newest message means the chat moved on, which is the only proof that
+    the allowance is usable again.
+    """
+    if not session_id:
+        return "unknown", 0
+    con = _open_db()
+    if con is None:
+        return "unknown", 0
+    try:
+        message = _newest_message(con, session_id)
+    finally:
+        try:
+            con.close()
+        except Exception:
+            pass
+    if not message:
+        return "unknown", 0
+    created = message[2] // 1000 if message[2] else 0
+    return ("walled" if _is_free_wall_message(message) else "moved"), created
+
+
+def _session_verdict(session_id: str) -> str:
+    return _session_state(session_id)[0]
+
+
+def _sessions_still_walled(sessions: list[str] | None) -> list[str]:
+    """Chats from this wall whose newest message is still the limit error."""
+    return [sid for sid in (sessions or []) if sid and _session_verdict(sid) == "walled"]
+
+
+def _wall_targets(sessions: list[str] | None) -> list[str]:
+    """The chats a wall belongs to, falling back to the most recent one."""
+    targets = [sid for sid in (sessions or []) if sid]
+    if targets:
+        return targets
+    try:
+        from auto_resume import get_latest_session_info
+
+        info = get_latest_session_info()
+    except Exception:
+        return []
+    return [info[0]] if info else []
+
+
+def _wall_already_over(sessions: list[str] | None) -> bool:
+    """True when the chat that hit the wall has already moved past it.
+
+    The countdown banner can stay on screen while the next request succeeds, so
+    a log line alone is not proof the allowance is exhausted. Only a chat whose
+    newest message is something else counts as proof that it moved on; an
+    unreadable database leaves the wall intact.
+    """
+    explicit = [sid for sid in (sessions or []) if sid]
+    if explicit:
+        verdicts = [_session_verdict(sid) for sid in explicit]
+        return "walled" not in verdicts and "moved" in verdicts
+    try:
+        from auto_resume import get_latest_session_info
+
+        info = get_latest_session_info()
+    except Exception:
+        return False
+    if not info:
+        return False
+    verdict, created = _session_state(info[0])
+    # The line named no chat, so the newest one is only evidence when its
+    # answer came after the wall, not hours earlier.
+    return verdict == "moved" and bool(created) and time.time() - created <= WALL_LINE_MAX_AGE
+
+
+def _fallback_is_fresh(now: int) -> bool:
+    """True when a request left through the fallback route around now."""
+    try:
+        stamp = (LANE_DIR / "fallback.flag").stat().st_mtime
+    except OSError:
+        return False
+    return now - FALLBACK_WINDOW <= stamp <= now + FALLBACK_WINDOW
+
+
+def _reset_retry_ladder(state: dict) -> None:
+    """A chat that really answered means the wall is gone: start the ladder over."""
+    state["retry_level"] = 0
+    state["retry_marked_hop"] = 0
+    state["ladder_marked_hop"] = 0
+    state["failed_hops"] = 0
+    state["free_wall_hops"] = 0
+    state["free_wall_counted"] = 0
+
+
+def _refresh_client_lock(state: dict, now: int) -> None:
+    """Read the app's own wait-until time at most once a minute (display only)."""
+    if now - int(state.get("client_lock_at", 0) or 0) < LOCK_POLL_SECONDS:
+        return
+    state["client_lock_at"] = now
+    try:
+        from auto_resume import read_opencode_lock
+
+        info = read_opencode_lock()
+    except Exception:
+        return
+    until = int(info.get("until", 0) or 0)
+    previous = int(state.get("client_lock_until", 0) or 0)
+    state["client_lock_until"] = until
+    state["client_lock_keys"] = dict(info.get("keys") or {})
+    _save_state(state)
+    if until and until != previous:
+        shown = datetime.fromtimestamp(until).strftime("%a %H:%M")
+        append_log(
+            GUARD_LOG_FILE,
+            f"the app's own banner says wait until {shown} - that is a client hint, "
+            f"not proof of a wall, so the chat is tried before any hop",
+        )
+        _audit(state, "lock", client_lock_until=until, reason="read the client lock")
+
+
+def _clear_stale_lock(state: dict, now: int) -> bool:
+    """Drop a client lock whose advertised time has passed, even while paused."""
+    until = int(state.get("client_lock_until", 0) or 0)
+    if not until or until > now:
+        return False
+    if now - int(state.get("lock_cleared_at", 0) or 0) < LOCK_CLEAR_MIN_SECONDS:
+        return False
+    state["lock_cleared_at"] = now
+    state["client_lock_until"] = 0
+    state["client_lock_keys"] = {}
+    cleared = 0
+    try:
+        from auto_resume import clear_opencode_free_limit
+
+        cleared = clear_opencode_free_limit()
+    except Exception:
+        pass
+    _save_state(state)
+    append_log(
+        GUARD_LOG_FILE,
+        f"the app's wait-until time passed - cleared {cleared} stale lock row(s) so the "
+        f"composer is usable again",
+    )
+    _audit(
+        state,
+        "lock",
+        cleared_rows=cleared,
+        decision="lock-expired",
+        reason="the advertised wait time has passed",
+    )
+    return True
+
+
+def _soft_retry(state: dict, now: int, sessions: list[str] | None) -> bool:
+    """Clear the lock and send one 'continue' before spending a hop.
+
+    The banner is a client hint, and a request can still succeed behind it. One
+    cheap attempt answers that question without reconnecting WARP; only a real
+    failure is worth a new address.
+    """
+    if not SOFT_RETRY_ENABLED:
+        return False
+    targets = _wall_targets(sessions)
+    if not targets:
+        return False
+    if _wall_is_self_inflicted(state, targets, now):
+        # The guard just sent this chat a 'continue'; the attempt already exists,
+        # so a wall right after it belongs to the hop path.
+        return False
+    pending = state.setdefault("soft_pending", {})
+    counts = state.setdefault("soft_retry", {})
+    todo = [
+        sid
+        for sid in targets
+        if sid not in pending and int(counts.get(sid, 0) or 0) == 0
+    ]
+    if not todo:
+        return False
+    ok = False
+    try:
+        from auto_resume import resume_active_session
+
+        ok, message = resume_active_session(todo)
+    except Exception as exc:
+        append_log(GUARD_LOG_FILE, f"soft retry could not run: {exc}")
+        return False
+    for sid in todo:
+        pending[sid] = now
+        # The wall this prompt produces is the guard's own doing, so it must not
+        # be counted as proof that the new /64 is spent.
+        state.setdefault("resumed", {})[sid] = now
+    _save_state(state)
+    append_log(
+        GUARD_LOG_FILE,
+        f"soft retry: lock cleared and 'continue' {'sent' if ok else 'could not be sent'} to "
+        f"{len(todo)} chat(s) - watching the chat before touching the route",
+    )
+    _audit(
+        state,
+        "unlock",
+        sessions=len(todo),
+        resume_result="sent" if ok else "not sent",
+        decision="soft-retry",
+        reason="trying the chat once before a new address",
+    )
+    return True
+
+
+def _check_soft_retry(state: dict, now: int) -> str:
+    """Resolve pending soft retries from the database.
+
+    Returns 'walled' when a chat came back to the limit (a hop is justified),
+    'waiting' while the attempt is still inside its window, 'ok' when the chat
+    answered, and '' when there is nothing pending.
+    """
+    pending = state.get("soft_pending")
+    if not isinstance(pending, dict) or not pending:
+        return ""
+    results: set[str] = set()
+    for sid, started in list(pending.items()):
+        try:
+            at = int(started or 0)
+        except (TypeError, ValueError):
+            at = 0
+        if not at:
+            pending.pop(sid, None)
+            results.add("ok")
+            continue
+        waited = now - at
+        if waited < SOFT_RETRY_SECONDS:
+            results.add("waiting")
+            continue
+        verdict = _session_verdict(sid)
+        if verdict == "moved":
+            pending.pop(sid, None)
+            state["last_verdict"] = "resumed"
+            state["verdict_at"] = now
+            _reset_retry_ladder(state)
+            append_log(
+                GUARD_LOG_FILE,
+                "soft retry worked - the chat answered, so no new address was spent",
+            )
+            _audit(
+                state,
+                "unlock",
+                sessions=1,
+                resume_result="resumed",
+                decision="soft-retry ok",
+                reason="the chat answered without a new address",
+            )
+            results.add("ok")
+            continue
+        if verdict == "unknown" and waited < SOFT_RETRY_MAX_WAIT:
+            results.add("waiting")
+            continue
+        pending.pop(sid, None)
+        counts = state.setdefault("soft_retry", {})
+        counts[sid] = int(counts.get(sid, 0) or 0) + 1
+        state["last_verdict"] = "still walled"
+        state["verdict_at"] = now
+        append_log(
+            GUARD_LOG_FILE,
+            f"soft retry came back to the limit after {waited}s - rotating to a new address",
+        )
+        _audit(
+            state,
+            "unlock",
+            sessions=1,
+            resume_result="walled",
+            decision="soft-retry failed",
+            reason="the chat went back to the free limit",
+        )
+        results.add("walled")
+    _save_state(state)
+    if "walled" in results:
+        return "walled"
+    if "waiting" in results:
+        return "waiting"
+    return "ok" if "ok" in results else ""
+
+
+def _verify_resume(state: dict, now: int) -> None:
+    """Turn 'continue was sent' into a verdict once the database has news.
+
+    Without this the guard only ever knew that a keystroke left the process, so
+    "rotated but still limited" looked identical to a working rotation.
+    """
+    table = state.get("resume_verify")
+    if not isinstance(table, dict) or not table:
+        return
+    changed = False
+    for sid, item in list(table.items()):
+        if not isinstance(item, dict):
+            table[sid] = {"at": now, "verdict": "pending"}
+            changed = True
+            continue
+        if item.get("verdict") != "pending":
+            continue
+        try:
+            at = int(item.get("at", 0) or 0)
+        except (TypeError, ValueError):
+            at = 0
+        if not at or now - at < RESUME_VERIFY_SECONDS:
+            continue
+        verdict = _session_verdict(sid)
+        if verdict == "moved":
+            item["verdict"] = "resumed"
+            state["last_verdict"] = "resumed"
+            state["verdict_at"] = now
+            _reset_retry_ladder(state)
+            changed = True
+            _audit(
+                state,
+                "unlock",
+                sessions=[sid],
+                resume_result="resumed",
+                decision="resume-ok",
+                reason="the chat answered after the rotation",
+            )
+        elif verdict == "walled":
+            item["verdict"] = "still walled"
+            state["last_verdict"] = "still walled"
+            state["verdict_at"] = now
+            changed = True
+            append_log(
+                GUARD_LOG_FILE,
+                "the chat went straight back to the free limit after 'continue' - "
+                "this rotation did not help",
+            )
+            _audit(
+                state,
+                "unlock",
+                sessions=[sid],
+                resume_result="walled",
+                decision="resume-walled",
+                reason="the newest message is the free-limit error again",
+            )
+    if changed:
+        _save_state(state)
 
 
 def _rescue_stuck_sessions(state: dict, now: int | None = None) -> int:
@@ -738,6 +1159,11 @@ def record_hop(
         state["retry_marked_hop"] = 0
         state["ladder_marked_hop"] = 0
         state["switch_pending"] = {}
+        state["soft_retry"] = {}
+        state["soft_pending"] = {}
+        state["resume_verify"] = {}
+        state["client_lock_until"] = 0
+        state["last_verdict"] = ""
     _audit(
         state,
         "hop",
@@ -1323,6 +1749,13 @@ def main() -> int:
             _heartbeat()
             state = _load_state()
             now = int(time.time())
+            # The app's own countdown is a hint: read it for the dashboard and
+            # drop it once it has passed, even while rotation is paused, so a
+            # stale row cannot keep the composer disabled.
+            _refresh_client_lock(state, now)
+            _clear_stale_lock(state, now)
+            _verify_resume(state, now)
+            retry_status = _check_soft_retry(state, now)
             paused = _pause_left(state, now) > 0
             wall, sessions = _read_new_log_bytes(state, now)
             pending = state.setdefault("pending", {})
@@ -1330,10 +1763,22 @@ def main() -> int:
                 for sid in sessions:
                     pending.setdefault(sid, now)
                 _save_state(state)
-                # IP rotation comes first. A different account is only worth
-                # asking once a confirmed new /64 has already hit the wall;
-                # otherwise the first limit of the day silently spends it.
-                if int(state.get("free_wall_hops", 0) or 0) >= 1 and _switch_account(state, now):
+                if _wall_already_over(sessions):
+                    # The banner can stay on screen while the next request
+                    # succeeds, so this is not a wall: no hop, no counted wall.
+                    append_log(
+                        GUARD_LOG_FILE,
+                        "limit line seen, but the chat's newest message is not the limit - "
+                        "nothing to rotate",
+                    )
+                    _audit(
+                        state,
+                        "decision",
+                        decision="already-moved",
+                        reason="the chat's newest message is not the limit error",
+                    )
+                    state["wall_pending"] = False
+                    _save_state(state)
                     continue
             elif now - int(state.get("db_scan_at", 0) or 0) >= DB_WALL_SCAN_SECONDS:
                 # The log is the fast path; the database is the safety net for a
@@ -1357,12 +1802,36 @@ def main() -> int:
             if paused:
                 # Single gate in front of the IP work: while auto-rotation is
                 # paused this process neither reconnects WARP nor sends "continue".
+                # The lock cleanup above already ran, so a stale banner still clears.
                 continue
             if not wall and not state.get("wall_pending"):
                 continue
 
+            if wall or retry_status:
+                # A soft retry that is still inside its window owns the poll: the
+                # chat has not answered yet, so rotating now would spend a /64 to
+                # learn something this attempt is about to say for free.
+                if retry_status == "waiting":
+                    state["wall_pending"] = True
+                    _save_state(state)
+                    continue
+                if retry_status == "ok":
+                    state["wall_pending"] = False
+                    _save_state(state)
+                    continue
+                # Cheap attempt first: clear the lock and send one 'continue'.
+                if wall and _soft_retry(state, now, sessions):
+                    state["wall_pending"] = True
+                    _save_state(state)
+                    continue
+
             if wall:
                 if _note_wall(state, now, sessions):
+                    continue
+                # IP rotation comes first. A different account is only worth
+                # asking once a confirmed new /64 has already hit the wall;
+                # otherwise the first limit of the day silently spends it.
+                if int(state.get("free_wall_hops", 0) or 0) >= 1 and _switch_account(state, now):
                     continue
 
             last_hop = int(state.get("last_hop", 0) or 0)

@@ -891,6 +891,11 @@ class AvatarControlApi:
                 # One line that answers "why did it rotate / why did it not".
                 "last_decision": str(guard_state.get("last_decision", "") or ""),
                 "last_decision_at": int(guard_state.get("last_decision_at", 0) or 0),
+                # The app's own "wait until HH:MM" hint, shown but never obeyed.
+                "client_lock_until": int(guard_state.get("client_lock_until", 0) or 0),
+                "last_verdict": str(guard_state.get("last_verdict", "") or ""),
+                "verdict_at": int(guard_state.get("verdict_at", 0) or 0),
+                "soft_pending": len(guard_state.get("soft_pending") or {}),
                 "audit": _tail_audit(8),
                 "db": _read_db_stats(),
                 "log_size_bytes": log_size,
@@ -920,6 +925,9 @@ class AvatarControlApi:
             probe=probe,
             guard_backoff=int(guard_state.get("backoff_until", 0) or 0),
             guard_free_wall=int(guard_state.get("free_wall_until", 0) or 0),
+            client_lock_until=int(guard_state.get("client_lock_until", 0) or 0),
+            last_verdict=str(guard_state.get("last_verdict", "") or ""),
+            retry_level=int(guard_state.get("retry_level", 0) or 0),
             keeper_heartbeat=keeper_hb,
             guard_heartbeat=guard_hb,
             desktop_installed=bool(desktop_path),
@@ -946,6 +954,9 @@ class AvatarControlApi:
         probe: dict | None = None,
         guard_backoff: int = 0,
         guard_free_wall: int = 0,
+        client_lock_until: int = 0,
+        last_verdict: str = "",
+        retry_level: int = 0,
         keeper_heartbeat: float | None = None,
         guard_heartbeat: float | None = None,
         desktop_installed: bool = False,
@@ -960,8 +971,25 @@ class AvatarControlApi:
         proxy = proxy or {}
         net_errors = net_errors or []
 
-        def add(level: str, title: str, detail: str, fix: str | None = None, fix_label: str = "Fix it") -> None:
-            issues.append({"level": level, "title": title, "detail": detail, "fix": fix, "fix_label": fix_label})
+        def add(
+            level: str,
+            title: str,
+            detail: str,
+            fix: str | None = None,
+            fix_label: str = "Fix it",
+            actions: list[dict] | None = None,
+        ) -> None:
+            issue: dict = {"level": level, "title": title, "detail": detail}
+            if actions:
+                issue["actions"] = [
+                    {"fix": str(item["fix"]), "label": str(item.get("label") or "Fix it")}
+                    for item in actions
+                    if isinstance(item, dict) and item.get("fix")
+                ]
+            else:
+                issue["fix"] = fix
+                issue["fix_label"] = fix_label
+            issues.append(issue)
 
         mode = egress.get("mode", "warp")
         if not installed:
@@ -1151,6 +1179,44 @@ class AvatarControlApi:
                 "Try now",
             )
 
+        if client_lock_until and client_lock_until > time.time():
+            wait_at = time.strftime("%H:%M", time.localtime(client_lock_until))
+            add(
+                "warn",
+                f"OpenCode is showing 'wait until {wait_at}'",
+                "That countdown is a client-side hint written after a failed request, and requests "
+                "can still go through while it sits on screen. The guard clears the lock, tries the "
+                "chat once and only spends a new address if that attempt fails. Try it yourself, or "
+                "just reload the window to drop the banner without sending anything.",
+                actions=[
+                    {"fix": "retry-chat", "label": "Retry chat now"},
+                    {"fix": "reload-chat", "label": "Reload chat"},
+                ],
+            )
+
+        try:
+            from zen_guard import RETRY_STEPS
+
+            cap_minutes = RETRY_STEPS[-1] // 60
+            at_cap = retry_level >= len(RETRY_STEPS) - 1
+        except Exception:
+            cap_minutes, at_cap = 10, False
+
+        if last_verdict == "still walled" and at_cap:
+            add(
+                "warn",
+                "The allowance is following your account, not your address",
+                "A confirmed new IPv6 address went straight back to the free limit, and so did the "
+                "one cheap retry the guard sends before rotating. Reconnecting WARP cannot refill a "
+                "per-account allowance: switch model with /models, connect an account with quota "
+                "with /connect, or add another account to the pool. The guard keeps retrying every "
+                f"{cap_minutes} minutes on its own.",
+                actions=[
+                    {"fix": "retry-chat", "label": "Retry chat now"},
+                    {"fix": "hop", "label": "Try new address"},
+                ],
+            )
+
         brand_state = _desktop_brand_state()
         if brand_state.get("supported") and not brand_state.get("patched"):
             add(
@@ -1230,6 +1296,41 @@ class AvatarControlApi:
             return self.repair_warp_connection()
         if action == "hop":
             return self.hop_now()
+        if action == "retry-chat":
+            # The same low-cost repair the guard tries first: drop the client
+            # lock and send one 'continue', without spending an address.
+            try:
+                from auto_resume import clear_opencode_free_limit, send_continue_keystroke
+            except Exception as exc:
+                return {"ok": False, "message": f"Auto-resume is not available ({exc})."}
+            cleared = 0
+            try:
+                cleared = clear_opencode_free_limit()
+            except Exception:
+                pass
+            self._clear_soft_state()
+            if send_continue_keystroke(reload_first=True):
+                return {
+                    "ok": True,
+                    "message": (
+                        f"Cleared {cleared} lock row(s), reloaded the window and sent 'continue'. "
+                        "No IP was spent - if the chat still shows the limit, rotate instead."
+                    ),
+                }
+            return {
+                "ok": False,
+                "message": (
+                    f"Cleared {cleared} lock row(s), but no OpenCode window accepted the keystroke. "
+                    "Open the chat and press Retry again."
+                ),
+            }
+        if action == "reload-chat":
+            try:
+                from auto_resume import reload_opencode_window
+            except Exception as exc:
+                return {"ok": False, "message": f"Auto-resume is not available ({exc})."}
+            if reload_opencode_window():
+                return {"ok": True, "message": "OpenCode was reloaded - the wait banner should be gone."}
         if action == "fix_port":
             return self.fix_opencode_service()
         if action == "start_tor":
@@ -1535,6 +1636,37 @@ class AvatarControlApi:
         with self._egress_lock:
             self._egress_v6 = ""
         return {"ok": rc == 0, "message": "WARP disconnected." if rc == 0 else msg}
+
+    def _clear_soft_state(self) -> None:
+        """Forget the client-lock hint and the soft-retry bookkeeping.
+
+        A manual retry or deep reset is an explicit "start over": keeping a
+        stale retry counter would suppress the guard's own next attempt.
+        """
+        if not GUARD_STATE_FILE.is_file():
+            return
+        try:
+            state = json.loads(GUARD_STATE_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            return
+        if not isinstance(state, dict):
+            return
+        state.update(
+            {
+                "client_lock_until": 0,
+                "client_lock_keys": {},
+                "client_lock_at": 0,
+                "soft_pending": {},
+                "soft_retry": {},
+                "resume_verify": {},
+                "last_verdict": "",
+                "verdict_at": 0,
+            }
+        )
+        try:
+            GUARD_STATE_FILE.write_text(json.dumps(state), encoding="utf-8")
+        except Exception:
+            pass
 
     def _record_manual_hop(self, old_addr: str, new_addr: str, source: str) -> None:
         """Write a manual rotation through the guard's own recorder."""
@@ -2001,8 +2133,9 @@ class AvatarControlApi:
         if fl_cleared > 0:
             cleared.append(f"{fl_cleared} limit entries")
 
-        # Clear guard blacklist and reset edge override
+        # Clear guard blacklist, the client-lock hint and the soft-retry counters
         self.clear_blacklist()
+        self._clear_soft_state()
         self.set_edge_override("auto")
 
         rot_msg = ""

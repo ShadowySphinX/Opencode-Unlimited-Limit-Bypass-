@@ -264,18 +264,29 @@ def main() -> int:
     else:
         _warn(f"opencode not on PATH - add {BIN_DIR} to User PATH")
 
-    # 9. Client-side lock rows (names only - never the values)
+    # 9. Client-side lock rows (names and parsed times only - never the values)
     try:
-        from auto_resume import list_limit_state_keys
+        from auto_resume import list_limit_state_keys, read_opencode_lock
+
+        def _when(stamp: int) -> str:
+            return datetime.fromtimestamp(stamp).strftime("%d %b %H:%M")
 
         lock_rows = list_limit_state_keys()
+        info = read_opencode_lock()
+        times = dict(info.get("keys") or {})
         if lock_rows:
-            names = sorted({name for _db, name in lock_rows})
+            parts = []
+            for name in sorted({name for _db, name in lock_rows}):
+                stamp = int(times.get(name, 0) or 0)
+                parts.append(f"{name} -> wait until {_when(stamp)}" if stamp else f"{name} -> no time stored")
             _warn(
                 "client lock rows present: "
-                + ", ".join(names)
-                + " - the next rotation clears them"
+                + "; ".join(parts)
+                + " - that time is a client hint: the guard clears it, tries the chat once, "
+                "and only rotates if that attempt fails"
             )
+        elif int(info.get("until", 0) or 0):
+            _ok(f"client lock says wait until {_when(int(info['until']))} (a hint, not a wall)")
         else:
             _ok("no client-side limit lock rows")
     except Exception as exc:

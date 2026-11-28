@@ -57,12 +57,12 @@ This tool monitors OpenCode logs for quota and rate-limit errors, cycles the act
 * **Dashboard redesign.** Dark single-surface layout, segmented egress tabs, health
   issues as rows with an inline fix button, sticky log panel that fills its column,
   glass tooltips, and a confirm modal. Same controls, same ids, same API.
-* **Version 4.0.2** across `build_exe.ps1`, `build_multi_exe.ps1`, the installers, the
+* **Version 4.0.3** across `build_exe.ps1`, `build_multi_exe.ps1`, the installers, the
   window title, and the probe user agent.
 
 ---
 
-## Rotation Is Deterministic (v4.0.2)
+## Rotation Is Deterministic (v4.0.3)
 
 The guard now guarantees that a wall produces exactly one decision, and that the
 decision is written down. Every poll leaves a line in `~/.opencode-unlimited/guard/guard_audit.jsonl`
@@ -91,6 +91,24 @@ dashboard shows the newest one as **Last decision**.
 * **Accounts are last resort:** a different account is only tried after a confirmed new
   `/64` has already hit the wall, the switch is verified against the account pool, and the
   previous account is only marked spent when a wall follows the switch within two minutes.
+* **The app's countdown is a hint, not a wall:** the `wait until 5:37 AM` banner is a row
+  OpenCode writes client-side after a failed request, and requests can still succeed
+  behind it. The guard reads that row, shows **OpenCode is showing 'wait until HH:MM'** in
+  the health panel, and clears it as soon as the advertised time passes - even while
+  rotation is paused, so a stale row cannot keep the composer disabled all day.
+* **Cheap attempt before the hop:** on a wall the guard clears the lock, reloads the window
+  and sends one `continue`, then watches the database for 90 s. If the chat answers, no
+  address was spent (`soft-retry ok`). Only a second limit falls through to a rotation.
+  Set `OUC_SOFT_RETRY=0` if you would rather not have that extra turn in the chat.
+* **"Rotated" is verified, not assumed:** after a hop the guard watches the chat's newest
+  message for 60 s and records `resumed`, `still walled` or `pending` in the audit and the
+  health panel. When a confirmed new `/64` and the cheap retry both come back to the wall,
+  the panel says so: *the allowance is following your account, not your address.*
+* **Two new one-click repairs:** **Retry chat now** (clear the lock and send one
+  `continue`, no rotation) and **Reload chat** (reload the window, type nothing). They are
+  the same low-cost steps the guard tries first, on demand.
+* **Doctor shows the wait time:** `opencode-unlimited-doctor` prints each lock row with its
+  parsed time (`free-limit -> wait until 29 Nov 05:37`) and never the stored value.
 * **Protocol travels with the mode:** every hop goes through `hop_report`, which applies
   `ensure_warp_mode`: MASQUE before switching to proxy mode, WireGuard for the full tunnel.
   Covered by `tests/test_warp_scope.py` and the `hop_report` tests in `tests/test_reliability.py`.
@@ -361,7 +379,7 @@ A common concern is whether rotating limits requires starting a brand-new chat. 
 1. **Server-Side Quota (IP-Based):** OpenCode's backend applies free-tier limits to the incoming public IP address, and the allowance is shared across the free models. Rotating the IPv6 `/64` presents a different address, which is the behavior the rotator relies on. The check now uses the address seen from outside, not the local WARP adapter. If WARP cannot carry IPv6, requests leave over IPv4 or a direct route and no amount of `/64` rotation changes the server-side bucket. The dashboard reports that case instead of claiming success.
 2. **Client-Side Lockout Removal:** When OpenCode Desktop hits a rate limit, the local Electron app writes a lockout timestamp into `%APPDATA%\ai.opencode.desktop\drafts.sqlite` (`state` table). Zen Guard deletes this key (`DELETE FROM state WHERE key IN ('free-limit', 'go-upsell')`).
 3. **History Preservation:** The reset only touches those lockout keys. Chat history, system prompts, code blocks, and context in the `document` and `session_v2` tables are left unchanged.
-4. **Window Reload & Resume:** The app reloads OpenCode Desktop, which refreshes the view and clears the banner, then sends `continue{ENTER}`. If the window cannot be focused safely, it falls back to a CLI resume.
+4. **Window Reload & Resume:** The app reloads OpenCode Desktop, which refreshes the view and clears the banner, then sends `continue{ENTER}`. If the window cannot be focused safely, it falls back to a CLI resume. The guard then checks the chat's newest message: an answer means the wall is gone, another `FreeUsageLimitError` means this address did not help.
 5. **Resume When a Pause Ends:** A pause is only ever a pause, never a stop for the day. When it ends the guard asks `opencode.db` which chats are still sitting on the free-limit error, queues them and sends `continue`, logging `allowance window reopened` so the history shows why the chat moved.
 6. **Chats Left on the Wall Before a Start:** A reboot, an update or a manual stop means the wall happened while the guard was not reading the log. On start it looks in `opencode.db` for recent chats whose newest message is the free-limit error itself (`finish = error`), queues them and resumes them. A chat that was answered afterwards is not touched, and a rescue that just failed is not repeated for 15 minutes.
 
@@ -370,7 +388,7 @@ A common concern is whether rotating limits requires starting a brand-new chat. 
 ## Troubleshooting Playbook ("What to do when something happens")
 
 ### 1. What to do when you hit a rate limit wall
-* **Automatic Behavior:** With Zen Guard and Auto-Resume on, the guard rotates the egress address, clears the client lockout, and attempts to resume the session. A rotation usually completes within a minute.
+* **Automatic Behavior:** With Zen Guard and Auto-Resume on, the guard first treats the client lockout as a hint: it clears the row, reloads the window, sends one `continue` and watches the chat for 90 s. If the chat answers, nothing is rotated. If the limit comes straight back, it rotates the egress address and continues the session. A rotation usually completes within a minute.
 * **If the limit comes back on a confirmed new address:** the free allowance may not be following your IP. Rotation does not stop for the day: after two confirmed new IPv6 addresses it backs off 75 s -> 2 min -> 5 min -> 10 min (cap) and keeps trying, and a hop that holds past three minutes resets the backoff. If the wall follows the address even then, use another provider (`/connect`), subscribe to OpenCode Go, or press **Try now**.
 * **Manual Override:** To rotate now, click the hop button on the dashboard. Its label follows the active mode: **Rotate /64 Now (Hop)** for WARP, **Rotate Circuit (Hop)** for Tor, and **Rotate Proxy (Hop)** for a custom pool.
 

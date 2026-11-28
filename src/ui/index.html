@@ -1599,20 +1599,23 @@
       text.appendChild(title);
       text.appendChild(detail);
       row.appendChild(text);
-      if (issue.fix) {
+      const actions = (issue.actions && issue.actions.length)
+        ? issue.actions
+        : (issue.fix ? [{ fix: issue.fix, label: issue.fix_label || "Fix it" }] : []);
+      actions.forEach((action) => {
         const btn = document.createElement("button");
         btn.className = "btn btn-sm" + (issue.level === "bad" ? " btn-danger" : "");
-        btn.textContent = issue.fix_label || "Fix it";
+        btn.textContent = action.label || "Fix it";
         btn.onclick = async () => {
           btn.disabled = true;
           try {
-            await runAction(null, () => window.pywebview.api.fix_issue(issue.fix));
+            await runAction(null, () => window.pywebview.api.fix_issue(action.fix));
           } finally {
             btn.disabled = false;
           }
         };
         row.appendChild(btn);
-      }
+      });
       list.appendChild(row);
     });
   }
